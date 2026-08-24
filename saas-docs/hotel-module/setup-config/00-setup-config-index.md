@@ -17,27 +17,48 @@ Right setup = Right rules = System runs itself
 
 ---
 
-## 13 Areas of Setup & Configuration
+## 16 Areas of Setup & Configuration
 
 | # | Area | Status |
 |---|------|--------|
-| 1 | Property Setup | 🔲 To discuss |
-| 2 | Room Setup | 🔲 To discuss |
-| 3 | Rate Setup | 🔲 To discuss |
-| 4 | Policy Setup | 🔲 To discuss |
-| 5 | Payment Setup | 🔲 To discuss |
-| 6 | Housekeeping Setup | 🔲 To discuss |
+| 1 | Property Setup | ✅ Done |
+| 2 | Room Setup | ✅ Done |
+| 3 | Rate Setup | ✅ Done (unified in 03-rate-plan-setup.md) |
+| 4 | Policy Setup | ✅ Done (unified in 03-rate-plan-setup.md) |
+| 5 | Payment Setup | ✅ Done (unified in 03-rate-plan-setup.md) |
+| 6 | Housekeeping Setup | ✅ Done |
 | 7 | Staff & Roles Setup | 🔲 To discuss |
-| 8 | Channel Setup (OTA) | 🔲 To discuss |
-| 9 | Folio & Billing Setup | 🔲 To discuss |
+| 8 | Channel Setup (OTA) | ✅ Done (unified in 03-rate-plan-setup.md) |
+| 9 | Folio, Billing & Night Audit Setup | 🔲 To discuss |
 | 10 | Notification Setup | 🔲 To discuss |
 | 11 | Guest Portal Setup | 🔲 To discuss |
-| 12 | Night Audit Setup | 🔲 To discuss |
-| 13 | Integrations Setup | 🔲 To discuss |
+| 12 | Integrations Setup | 🔲 To discuss |
+| 13 | Maintenance Setup | 🔲 To discuss |
+| 14 | Tax Configuration | 🔲 To discuss |
+| 15 | Group & Corporate Setup | 🔲 To discuss |
+| 16 | Report & Analytics Setup | 🔲 To discuss |
 
 ---
 
-## High Level Overview (Before Deep Dive)
+## Key Insight: Areas 3, 4, 5, 8 are One Unified Concept
+
+```
+Rate Setup + Policy Setup + Payment Setup + Channel Setup
+= RATE PLAN
+
+A Rate Plan defines the complete bookable behaviour of a room:
+  - What price?         → Rate Setup
+  - What rules?         → Policy Setup (cancellation, check-in time)
+  - How to collect?     → Payment Setup (deposit, pay now, guarantee)
+  - Where to sell?      → Channel Setup (OTA, direct, walk-in)
+
+One Rate Plan = one complete package a guest can book.
+These 4 areas must be discussed together.
+```
+
+---
+
+## High Level Overview
 
 ### 1. Property Setup
 ```
@@ -49,7 +70,7 @@ Right setup = Right rules = System runs itself
 └── Currency
 ```
 
-### 2. Room Setup
+### 2. Room Setup ✅
 ```
 ├── Room types (name, description, max capacity, sq ft)
 ├── Actual rooms (room number, floor, type assignment)
@@ -64,7 +85,7 @@ Right setup = Right rules = System runs itself
 ### 3. Rate Setup
 ```
 ├── Base rate per room type
-├── Rate plans (name, price, meal inclusion, visibility, linked policy)
+├── Rate plans (name, price, meal inclusion, visibility)
 ├── Date-based overrides (seasonal, weekend, holiday)
 ├── OTA-specific rates (per channel commission %)
 └── Length of stay (LOS) restrictions
@@ -86,8 +107,7 @@ Right setup = Right rules = System runs itself
 ├── Deposit rules per rate plan
 ├── Credit card guarantee rules
 ├── Refund policy
-├── Tax configuration (GST per charge type)
-└── Invoice setup (GSTIN, format, template)
+└── Invoice setup (format, template)
 ```
 
 ### 6. Housekeeping Setup
@@ -119,13 +139,15 @@ Right setup = Right rules = System runs itself
 └── Stop sell rules
 ```
 
-### 9. Folio & Billing Setup
+### 9. Folio, Billing & Night Audit Setup
 ```
 ├── Folio number format
-├── Night audit time
+├── Night audit run time
 ├── Auto-post rules
 ├── Cross-module charge routing
-└── Folio display preferences
+├── Folio display preferences
+├── No-show auto-charge rules
+└── Reports to auto-generate at audit
 ```
 
 ### 10. Notification Setup
@@ -146,21 +168,49 @@ Right setup = Right rules = System runs itself
 └── Loyalty program enable/disable
 ```
 
-### 12. Night Audit Setup
-```
-├── Audit run time
-├── Reports to auto-generate
-├── Who receives each report
-└── No-show auto-charge rules
-```
-
-### 13. Integrations Setup
+### 12. Integrations Setup
 ```
 ├── Payment gateway credentials
 ├── SMS gateway credentials
 ├── Email provider
 ├── WhatsApp Business API
 └── Accounting software (Phase 2)
+```
+
+### 13. Maintenance Setup
+```
+├── Maintenance request categories (AC / Plumbing / Electrical...)
+├── Priority levels (Low / Medium / High / Emergency)
+├── Default SLA per priority (e.g., Emergency = 30 mins)
+├── Maintenance team assignment
+└── OOO auto-trigger rules (room auto Out-of-Order when open ticket)
+```
+
+### 14. Tax Configuration
+```
+├── GST rates per charge type (room, food, beverage, service)
+├── Tax-inclusive vs tax-exclusive pricing
+├── GSTIN setup per property
+├── HSN/SAC codes per charge type
+└── Tax exemption rules (corporate, government)
+```
+
+### 15. Group & Corporate Setup
+```
+├── Group block default settings (cut-off days, deposit %)
+├── Corporate account profiles
+├── Contract rate templates
+├── Billing arrangement defaults (master bill, split bill)
+└── Auto-invoice schedule (monthly/weekly)
+```
+
+### 16. Report & Analytics Setup
+```
+├── Which reports auto-generate (daily/weekly/monthly)
+├── Who receives each report (email delivery)
+├── Dashboard KPI selection (what shows on home screen)
+├── Data retention period
+└── Export format preference (PDF / Excel / CSV)
 ```
 
 ---
@@ -174,21 +224,25 @@ Right setup = Right rules = System runs itself
 | Booking.com: 10% commission | New booking from Booking.com → OTA rate auto-applied |
 | Cancellation: Free until 48 hrs | Guest cancels 72 hrs before → Full refund auto-triggered |
 | Room 412: No-smoking, high floor | Check-in → System flags if wrong room type assigned |
+| Emergency SLA: 30 mins | Maintenance ticket raised → Alert fires if not responded in 30 mins |
+| GST: 18% on room above ₹7,500 | Booking at ₹8,000 → GST auto-calculated and added to folio |
+| Group cut-off: 7 days | 7 days before arrival → Unreleased rooms auto-return to inventory |
 
 ---
 
 ## Files in This Folder
+
 Each section gets its own detailed file after discussion:
-- `01-property-setup.md`
-- `02-room-setup.md`
-- `03-rate-setup.md`
-- `04-policy-setup.md`
-- `05-payment-setup.md`
+- `01-property-setup.md` ✅
+- `02-room-setup.md` ✅
+- `03-rate-plan-setup.md` ✅  ← Covers Areas 3 + 4 + 5 + 8 (Rate + Policy + Payment + Channel)
 - `06-housekeeping-setup.md`
 - `07-staff-roles-setup.md`
-- `08-channel-setup.md`
-- `09-folio-billing-setup.md`
+- `09-folio-billing-night-audit-setup.md`
 - `10-notification-setup.md`
 - `11-guest-portal-setup.md`
-- `12-night-audit-setup.md`
-- `13-integrations-setup.md`
+- `12-integrations-setup.md`
+- `13-maintenance-setup.md`
+- `14-tax-configuration.md`
+- `15-group-corporate-setup.md`
+- `16-report-analytics-setup.md`
