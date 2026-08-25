@@ -27,10 +27,10 @@ Right setup = Right rules = System runs itself
 | 4 | Policy Setup | ✅ Done (unified in 03-rate-plan-setup.md) |
 | 5 | Payment Setup | ✅ Done (unified in 03-rate-plan-setup.md) |
 | 6 | Housekeeping Setup | ✅ Done |
-| 7 | Staff & Roles Setup | 🔲 To discuss |
+| 7 | Staff & Roles Setup | ✅ Done |
 | 8 | Channel Setup (OTA) | ✅ Done (unified in 03-rate-plan-setup.md) |
-| 9 | Folio, Billing & Night Audit Setup | 🔲 To discuss |
-| 10 | Notification Setup | 🔲 To discuss |
+| 9 | Folio, Billing & Night Audit Setup | ✅ Done |
+| 10 | Notification Setup | ✅ Done |
 | 11 | Guest Portal Setup | 🔲 To discuss |
 | 12 | Integrations Setup | 🔲 To discuss |
 | 13 | Maintenance Setup | 🔲 To discuss |
