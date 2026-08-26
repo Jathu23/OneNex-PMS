@@ -31,11 +31,11 @@ Right setup = Right rules = System runs itself
 | 8 | Channel Setup (OTA) | ✅ Done (unified in 03-rate-plan-setup.md) |
 | 9 | Folio, Billing & Night Audit Setup | ✅ Done |
 | 10 | Notification Setup | ✅ Done |
-| 11 | Guest Portal Setup | 🔲 To discuss |
+| 11 | Guest Portal Setup | ✅ Done |
 | 12 | Integrations Setup | 🔲 To discuss |
-| 13 | Maintenance Setup | 🔲 To discuss |
-| 14 | Tax Configuration | 🔲 To discuss |
-| 15 | Group & Corporate Setup | 🔲 To discuss |
+| 13 | Maintenance Setup | ✅ Done (Phase 2 — V1 skip) |
+| 14 | Tax Configuration | ✅ Done (Sri Lanka — VAT + SC + TDL) |
+| 15 | Group & Corporate Setup | ✅ Done |
 | 16 | Report & Analytics Setup | 🔲 To discuss |
 
 ---
