@@ -66,8 +66,28 @@ src/
 │   ├── CRM/
 │   └── Staff/
 │
-└── Shared.Contracts/        ← interfaces only — modules communicate through this
+├── Shared.Contracts/        ← interfaces only — how modules talk to each other
+│     IBusinessService, INotificationService, IPaymentService...
+│     No implementations here. Contracts only.
+│
+└── Shared.Kernel/           ← building blocks every module builds on
+      ├── ValueObjects/
+      │     Money, Email, PhoneNumber, DateRange, TimeRange,
+      │     Percentage, Address, CountryCode, CurrencyCode
+      ├── Abstractions/
+      │     Entity<T>, AggregateRoot<T>, IDomainEvent, IRepository<T>
+      └── Exceptions/
+            DomainException, ValidationException, NotFoundException
 ```
+
+**Shared.Contracts vs Shared.Kernel:**
+
+| | Shared.Contracts | Shared.Kernel |
+|---|---|---|
+| Purpose | Module-to-module communication | Platform building blocks |
+| Contains | Interfaces (IXxxService, DTOs) | Value Objects, base classes, exceptions |
+| Who references it | Modules that call other modules | Every module, always |
+| Example | `IBusinessService.GetBusiness()` | `Money`, `Email`, `DateRange` |
 
 ### Level 2 — Feature Slices (Within Each Module)
 
