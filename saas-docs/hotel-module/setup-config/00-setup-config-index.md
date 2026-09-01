@@ -1,5 +1,5 @@
 # Hotel Module — Setup & Configuration
-> Status: In Progress | Discussing one by one
+> Status: ✅ ALL 16 AREAS COMPLETE
 > This is the foundation — Setup defines rules, Operations follow those rules
 
 ---
@@ -32,11 +32,11 @@ Right setup = Right rules = System runs itself
 | 9 | Folio, Billing & Night Audit Setup | ✅ Done |
 | 10 | Notification Setup | ✅ Done |
 | 11 | Guest Portal Setup | ✅ Done |
-| 12 | Integrations Setup | 🔲 To discuss |
+| 12 | Integrations Setup | ✅ Done (PayHere, Stripe, SMS, Email, WhatsApp, OTA channels) |
 | 13 | Maintenance Setup | ✅ Done (Phase 2 — V1 skip) |
 | 14 | Tax Configuration | ✅ Done (Sri Lanka — VAT + SC + TDL) |
 | 15 | Group & Corporate Setup | ✅ Done |
-| 16 | Report & Analytics Setup | 🔲 To discuss |
+| 16 | Report & Analytics Setup | ✅ Done (Dashboard KPIs + 19 reports + scheduling + delivery) |
 
 ---
 
@@ -236,13 +236,20 @@ Each section gets its own detailed file after discussion:
 - `01-property-setup.md` ✅
 - `02-room-setup.md` ✅
 - `03-rate-plan-setup.md` ✅  ← Covers Areas 3 + 4 + 5 + 8 (Rate + Policy + Payment + Channel)
-- `06-housekeeping-setup.md`
-- `07-staff-roles-setup.md`
-- `09-folio-billing-night-audit-setup.md`
-- `10-notification-setup.md`
-- `11-guest-portal-setup.md`
-- `12-integrations-setup.md`
-- `13-maintenance-setup.md`
-- `14-tax-configuration.md`
-- `15-group-corporate-setup.md`
-- `16-report-analytics-setup.md`
+- `06-housekeeping-setup.md` ✅
+- `07-staff-roles-setup.md` ✅
+- `09-folio-billing-night-audit-setup.md` ✅
+- `10-notification-setup.md` ✅
+- `11-guest-portal-setup.md` ✅
+- `12-integrations-setup.md` ✅
+- `13-maintenance-setup.md` ✅ (Phase 2 — V1 skip)
+- `14-tax-configuration.md` ✅
+- `15-group-corporate-setup.md` ✅
+- `16-report-analytics-setup.md` ✅
+
+---
+
+## Design Documents (Team Discussion Ready)
+
+- `room-setup-design-document.md` ✅  ← Full Room Setup with competitive analysis
+- `rate-plan-setup-design-document.md` ✅  ← Full Rate Plan with 14 entities + competitive analysis
