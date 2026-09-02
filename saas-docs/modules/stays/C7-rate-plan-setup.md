@@ -610,7 +610,53 @@ last_violation_detected_at     timestamp nullable.
 ```
 
 **Phase 2.** V1 does not actively monitor parity.
+A practical flow:
+1. Scheduled job runs, e.g. every 6 hours.
+2. Get the direct-channel price from your own rate/availability engine.
+3. Get OTA prices from channel-manager APIs, OTA APIs, or controlled rate shopping.
+4. Normalize currency, taxes, fees, and booking conditions.
+5. Calculate the difference.
+6. Save the check result.
+7. Create an alert if it violates the configured rule.
 
+
+
+Difference formula:
+differential_pct = ((direct_price - ota_price) / direct_price) × 100
+
+Example:
+Direct price = LKR 20,000
+OTA price    = LKR 18,000
+
+differential_pct = ((20,000 - 18,000) / 20,000) × 100
+                 = 10%
+The OTA is 10% cheaper.
+
+Rule evaluation:
+MATCH_DIRECT
+  Violation when OTA price < direct price.
+
+ALLOW_DIFFERENTIAL
+  Violation when differential_pct > max_allowed_differential_pct.
+
+NO_MONITORING
+  Do not run or evaluate parity checks for this rate plan.
+
+For example:
+parity_rule                   = ALLOW_DIFFERENTIAL
+max_allowed_differential_pct  = 5
+alert_threshold_pct           = 8
+- OTA 3% cheaper → allowed, no violation.
+- OTA 6% cheaper → violation, record it.
+- OTA 9% cheaper → violation and send an alert to the GM.
+
+![alt text](image.png)
+![alt text](image-1.png)
+
+Update the fields in RateParity after every completed job:
+last_checked_at              = current timestamp
+last_violation_detected_at   = current timestamp  // only when a violation occurs
+One important dependency: you need a mapping between your internal RatePlan / RoomType and each OTA’s rate and room identifiers. Without that mapping, the system cannot reliably compare the correct products.
 ---
 
 ### Entity 12: `DerivedRatePlan` — Auto-Cascade Pricing
