@@ -140,8 +140,7 @@ The root entity. Every other entity connects to this.
 
 ```
 id
-hotel_id
-operation_id
+business_id
 
 name                  "Executive Package" / "BAR Standard" / "MAS Holdings Corporate"
 code                  "EXP" / "BAR" / "MAS-CORP"
@@ -151,6 +150,23 @@ code                  "EXP" / "BAR" / "MAS-CORP"
 template_type
   → FLEXIBLE / NON_REFUNDABLE / ADVANCE_PURCHASE / LONG_STAY /
     BED_BREAKFAST / CORPORATE / CUSTOM
+
+  System-level enum. Each value maps to a hardcoded pre-defined config
+  in application code (not a DB table). When staff selects a template,
+  the system auto-fills 80% of fields. All fields remain editable after.
+
+  Template definitions (application constants):
+    FLEXIBLE         → cancel: free until 24h | payment: 20% deposit   | discount: none
+    NON_REFUNDABLE   → cancel: no refund       | payment: full pay now  | discount: 15-20% off
+    ADVANCE_PURCHASE → cancel: free until 72h  | payment: full pay now  | discount: 10-15% off
+    LONG_STAY        → cancel: free until 48h  | payment: 30% deposit   | discount: 10-20% off
+    BED_BREAKFAST    → cancel: free until 24h  | payment: 20% deposit   | meal: BREAKFAST
+    CORPORATE        → cancel: free until 48h  | payment: invoice        | discount: contract rate
+    CUSTOM           → staff configures all fields manually
+
+  This column is stored in DB to record which template was used as the
+  starting point — used in audit logs and UI display only.
+  Template definitions change via code deploy, not DB migration.
 
 pricing_model         PER_ROOM / PER_PERSON / PER_ADULT
 
