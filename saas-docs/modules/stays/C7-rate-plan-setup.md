@@ -168,7 +168,13 @@ meal_charge_per_night decimal nullable
 
 visibility
   → PUBLIC            Shown on hotel website, booking widget, OTAs
-  → PRIVATE           Requires promo code to access
+  → PRIVATE           Requires promo code to access.
+  A guest must enter a valid promotional or access code during booking to see and select it.
+     Example:
+        Rate: Weekend Special
+        Visibility: PRIVATE
+        Promo code: WEEKEND25
+        Without WEEKEND25, the guest only sees regular public rates. With it, they can see and book the private discounted rate.
   → CORPORATE         Shown only to linked corporate accounts
 
 status
@@ -184,7 +190,14 @@ is_active             bool. Quick disable without archiving.
 display_order         int. Controls order shown in UI and booking widget.
 currency_code         "LKR" / "USD" / "EUR". Inherited from hotel, override per plan.
 advance_purchase_min_days  int nullable. Advance Purchase template: must book X days before.
+advance_purchase_min_days defines how far in advance a guest must book to qualify for the rate.
+For xample, advance_purchase_min_days = 7
+A guest can book the rate only if their check-in date is at least 7 days away. For example, on 1 June, the earliest eligible check-in is 8 June.
+It is nullable because many rates have no advance-purchase restriction:
 tax_profile_id        FK → TaxProfile nullable. If null: hotel default tax applies.
+tax_profile_id identifies the tax rule set to apply to that specific rate.
+tax_profile_id = 12  → “Reduced Accommodation Tax”
+If it is NULL, the system uses the hotel’s default tax profile instead. This lets you override normal tax treatment only for special rate plans, such as corporate, tax-exempt, or region-specific rates.
 
 created_at / updated_at
 ```
@@ -219,12 +232,47 @@ base_rate             decimal. The nightly rate for this room type under this pl
   by DerivedRatePlan formula. Staff cannot manually edit it.
   The DerivedRatePlan entity OWNS the formula. RatePlanRoom just stores the result.
 
+
+  HOW TO IMPLEMENT DERIVED PLAN?
+  RatePlan
+- id
+- name
+- parent_rate_plan_id nullable
+- pricing_mode: MANUAL | DERIVED
+
+DerivedRatePlan
+- id
+- rate_plan_id             FK → child RatePlan
+- parent_rate_plan_id      FK → parent RatePlan
+- adjustment_type          PERCENTAGE | FIXED_AMOUNT
+- adjustment_value         decimal
+- rounding_rule             optional
+
+Example record:
+child_rate_plan       = Non-Refundable Rate
+parent_rate_plan      = Flexible Rate
+adjustment_type       = PERCENTAGE
+adjustment_value      = -15
+
+Calculation:
+derived price = parent base_rate × (1 + adjustment_value / 100)
+So:
+$200 × (1 - 15 / 100) = $170
+
+Typical ways to derive a plan:
+Early Booker      = Flexible Rate − 10%
+Non-Refundable    = Flexible Rate − 15%
+Weekend Premium   = Flexible Rate + 20%
+Corporate Rate    = Flexible Rate − fixed $25
+
+RatePlanRoom.base_rate for a derived plan is read-only because it stores the calculated result for fast searching and auditing. When creating a derived plan, choose the parent plan and set the adjustment formula; then create/update RatePlanRoom records by calculating prices for every active room type in the parent.
+
 is_active             bool. Include/exclude this room type from this rate plan.
 ```
 
 **How it works:**
 ```
-Rate Plan "BAR Standard" × 4 room types = 4 RatePlanRoom rows
+Rate Plan "BAR(Best Available Rate) Standard" × 4 room types = 4 RatePlanRoom rows
 
 room_type        base_rate
 ──────────────────────────
@@ -237,9 +285,10 @@ Suite            LKR 35,000
 ---
 
 ### Entity 3: `RatePlanDateOverride` — Seasonal / Holiday Pricing
+HAVE TO CONSIDER ABOUT THE RECURRENCE.........
 
 Override the base rate for specific date ranges. Christmas pricing, Sinhala New Year,
-Valentine's Day. Also controls date-based restrictions (CTA/CTD).
+Valentine's Day. Also controls date-based restrictions Close to Arrival(CTA)/Close to Departure(CTD).
 
 ```
 id
