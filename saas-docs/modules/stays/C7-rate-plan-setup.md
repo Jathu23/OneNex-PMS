@@ -668,7 +668,7 @@ no-show as a distinct configurable charge).
 
 ---
 
-### Entity 8b: `NoShowPolicy` — Reusable No-Show Rules
+### Entity 9: `NoShowPolicy` — Reusable No-Show Rules
 
 **Single source of truth for all no-show rules.** Created once → reused across many rate plans.
 A no-show is when the guest fails to arrive without cancelling — a different event from cancellation,
@@ -752,7 +752,7 @@ REPORTING CLARITY:
 
 ---
 
-### Entity 9: `RatePlanPolicy` — Operational Rules
+### Entity 10: `RatePlanPolicy` — Operational Rules
 
 Check-in/out times, child policy, pet policy for this specific rate plan.
 Also links the two reusable policies (cancellation + no-show) into this rate plan.
@@ -808,7 +808,7 @@ If any level says no → pet not permitted.
 
 ---
 
-### Entity 10: `RatePlanPayment` — Payment Collection Config
+### Entity 11: `RatePlanPayment` — Payment Collection Config
 
 How and when payment is collected for bookings under this rate plan.
 
@@ -840,7 +840,7 @@ refund_policy_days    int nullable. Days within which refund is processed.
 
 ---
 
-### Entity 11: `RatePlanChannel` — Channel Distribution
+### Entity 12: `RatePlanChannel` — Channel Distribution
 
 Controls which channels (OTAs, direct) sell this rate plan.
 Each row = one rate plan × one channel combination.
@@ -875,7 +875,7 @@ is_active             bool. Enable/disable this channel without deleting the rec
 
 ---
 
-### Entity 12: `RateParity` — Price Consistency Monitoring
+### Entity 13: `RateParity` — Price Consistency Monitoring
 
 Monitors that this rate plan's price doesn't appear cheaper on OTAs than on the hotel's
 direct channel. Protects direct booking margin.
@@ -945,7 +945,7 @@ last_violation_detected_at   = current timestamp  // only when a violation occur
 One important dependency: you need a mapping between your internal RatePlan / RoomType and each OTA’s rate and room identifiers. Without that mapping, the system cannot reliably compare the correct products.
 ---
 
-### Entity 13: `DerivedRatePlan` — Auto-Cascade Pricing
+### Entity 14: `DerivedRatePlan` — Auto-Cascade Pricing
 
 Defines how one rate plan is automatically calculated from another.
 The child rate plan's prices update automatically when the parent changes.
@@ -999,7 +999,7 @@ Prevention: Before every DerivedRatePlan save, application checks:
 
 ---
 
-### Entity 14: `PackageInclusion` — Bundled Services
+### Entity 15: `PackageInclusion` — Bundled Services
 
 Defines what is included in a package rate plan beyond just the room.
 Controls how inclusions appear on folio, trigger housekeeping tasks,
@@ -1067,7 +1067,7 @@ Setup once → auto-splits forever.
 
 ---
 
-### Entity 15: `RatePlanAuditLog` — Full Change History
+### Entity 16: `RatePlanAuditLog` — Full Change History
 
 Every change to every rate plan is recorded. Who changed what, when, and why.
 Also shows how many future bookings are affected before confirming the change.
@@ -1117,7 +1117,7 @@ SCENARIO 3: OTA dispute
 
 ---
 
-### Entity 16: `Channel` — Distribution Channel Master Table
+### Entity 17: `Channel` — Distribution Channel Master Table
 
 Master table of all distribution channels. Replaces hardcoded enum in `RatePlanChannel`.
 Adding a new OTA = insert one row. Zero code change. Zero deployment.
