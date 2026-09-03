@@ -68,7 +68,7 @@ USER B: Luxury Resort Revenue Manager
   → Needs full control of every rate logic
 ```
 
-Same 16 entities. Different depth of usage:
+Same 17 entities. Different depth of usage:
 
 ```
 SMALL GUESTHOUSE:                     LUXURY RESORT:
@@ -199,7 +199,7 @@ To change it: archive the plan and create a new one, or work in DRAFT before act
 
 ---
 
-## 6. The 15 Entities
+## 6. The 16 Entities
 
 ### Entity 1: `RatePlan` — Master Record
 
@@ -612,16 +612,13 @@ date_change_allowed   bool. Can guest change their dates instead of cancelling?
 date_change_fee       decimal nullable. Fee charged for date change.
 date_change_window_hours  int nullable. Free date change until X hours before.
 
-no_show_charge
-  → NONE              No charge if guest doesn't arrive.
-  → FIRST_NIGHT       Charge the first night's rate.
-  → FULL_STAY         Charge the entire booking.
-  → FLAT_AMOUNT       Charge a fixed amount.
-
-no_show_flat_amount   decimal nullable. Used when no_show_charge = FLAT_AMOUNT.
-
 is_system_default     bool. One policy is the hotel default for new rate plans.
 ```
+
+> **Note:** No-show rules live in a separate `NoShowPolicy` entity (Entity 8b).
+> `CancellationPolicy` handles cancellation only. No-show is a different event
+> (guest doesn't communicate and simply fails to arrive), so it gets its own
+> reusable policy and entity.
 
 **Why CancellationPolicy is separate (not embedded in RatePlanPolicy):**
 ```
@@ -638,12 +635,115 @@ OUR SOLUTION:
   No risk of inconsistency.
 ```
 
-**Why no_show_charge lives HERE only:**
+**Why no_show was extracted into its own entity:**
 ```
-Previously considered: no_show_charge in RatePlanPolicy.
-Removed. Reason: no-show IS a cancellation scenario.
-Guest doesn't arrive → treated as last-minute cancellation.
-Single source: CancellationPolicy. Never in RatePlanPolicy.
+Previously considered: no_show_charge in CancellationPolicy.
+Removed. Reason: a no-show is not the same as a cancellation.
+
+CANCELLATION  → Guest communicates before arrival. Booking is cancelled.
+NO-SHOW       → Guest simply does not arrive. No communication. Booking
+                silently expires at the cut-off time.
+
+Different events → different rules → different entities.
+
+CONSEQUENCES OF KEEPING THEM TOGETHER:
+  - Hot mixable scenarios: "No refund if cancelled within 24h, but no-show
+    charges first night" — these are different windows, different triggers,
+    and often different commercial treatments.
+  - Audit reports get noisy: "Was it a cancel or a no-show?" requires
+    digging into the same record.
+  - Reporting loses precision: revenue managers want to see no-show rates
+    separately from cancellation rates to measure demand vs fulfilment.
+
+OUR SOLUTION:
+  NoShowPolicy is its own entity (Entity 8b). Reusable, like CancellationPolicy.
+  CancellationPolicy handles cancellation only.
+  NoShowPolicy handles no-show only.
+  Both are linked from RatePlanPolicy.
+
+This separation also mirrors industry practice (OPERA, Mews, Apaleo all model
+no-show as a distinct configurable charge).
+```
+
+---
+
+### Entity 8b: `NoShowPolicy` — Reusable No-Show Rules
+
+**Single source of truth for all no-show rules.** Created once → reused across many rate plans.
+A no-show is when the guest fails to arrive without cancelling — a different event from cancellation,
+so it gets its own policy and its own entity.
+
+```
+id
+business_id
+name                  "First Night No-Show" / "Full Stay No-Show" / "Strict No-Show"
+
+charge_type
+  → NONE              No charge if guest doesn't arrive.
+  → FIRST_NIGHT       Charge the first night's rate.
+  → FULL_STAY         Charge the entire booking.
+  → FLAT_AMOUNT       Charge a fixed amount.
+
+flat_amount           decimal nullable. Used when charge_type = FLAT_AMOUNT.
+
+cut_off_time          time. The clock time on the arrival date after which an
+                      unarrived booking is marked as no-show.
+                      Example: 18:00 → a guest who hasn't checked in by 6 PM
+                      on the arrival date is flagged no-show.
+
+grace_period_minutes  int nullable. Minutes of buffer after cut_off_time before
+                      the no-show charge is actually posted to the folio.
+                      Example: cut_off_time = 18:00, grace_period = 120 →
+                      charge posts at 20:00. Allows front desk to handle
+                      late walk-ins without immediately billing.
+
+auto_mark_no_show     bool. true = system automatically flags unarrived bookings
+                      as no-show at cut_off_time + grace_period.
+                      false = front desk must manually mark (useful for properties
+                      where late arrivals are common and expected).
+
+waivable             bool. true = GM/manager can waive the charge manually.
+                     false = charge is hard — cannot be waived without DB override.
+
+is_system_default     bool. One policy is the hotel default for new rate plans.
+```
+
+**Why this is its own entity:**
+```
+REUSE ACROSS RATE PLANS:
+  Hotel has 8 rate plans. All use "First Night No-Show".
+  GM wants to change the cut-off from 18:00 to 20:00 globally.
+  Update NoShowPolicy once → all 8 rate plans reflect the change immediately.
+  No risk of inconsistency.
+
+INDEPENDENT FROM CANCELLATION:
+  A rate plan can have:
+    CancellationPolicy = "Free until 24h, then first night"
+    NoShowPolicy       = "Full stay, no grace period"
+  These are independent rules for independent events.
+
+REPORTING CLARITY:
+  Revenue manager dashboard splits:
+    - Cancellation rate
+    - No-show rate
+  Each metric measured separately. Different business levers.
+```
+
+**Trigger flow — when does a no-show charge get posted?**
+```
+1. Booking arrival date arrives.
+2. Front desk does NOT check the guest in.
+3. At cut_off_time (e.g., 18:00) — system starts the grace timer.
+4. At cut_off_time + grace_period_minutes (e.g., 20:00) — system:
+   a. Marks booking status = NO_SHOW (if auto_mark_no_show = true).
+   b. Posts the configured charge (FIRST_NIGHT / FULL_STAY / FLAT_AMOUNT)
+      to the guest folio as a No-Show Fee line item.
+   c. Logs the action in RatePlanAuditLog.
+5. If auto_mark_no_show = false, a NO_SHOW_PENDING flag is shown to front
+   desk. Staff can either:
+     - Check the guest in (clears the flag).
+     - Manually confirm no-show → charge posts.
+     - Manually waive → no charge, logged as waived.
 ```
 
 ---
@@ -651,11 +751,22 @@ Single source: CancellationPolicy. Never in RatePlanPolicy.
 ### Entity 9: `RatePlanPolicy` — Operational Rules
 
 Check-in/out times, child policy, pet policy for this specific rate plan.
+Also links the two reusable policies (cancellation + no-show) into this rate plan.
 Overrides hotel-level defaults where needed.
 
 ```
 id
 rate_plan_id          FK → RatePlan (1:1)
+
+cancellation_policy_id  FK → CancellationPolicy nullable.
+                        null = inherit hotel default cancellation policy.
+                        This is the only place cancellation is wired in.
+                        See Entity 8 for reusable cancellation policy.
+
+no_show_policy_id     FK → NoShowPolicy nullable.
+                        null = inherit hotel default no-show policy.
+                        This is the only place no-show is wired in.
+                        See Entity 8b for reusable no-show policy.
 
 check_in_from         time nullable. null = inherit hotel default.
 check_out_until       time nullable. null = inherit hotel default.
@@ -959,7 +1070,7 @@ Also shows how many future bookings are affected before confirming the change.
 
 ```
 id
-hotel_id
+
 rate_plan_id          FK → RatePlan
 changed_by_staff_id   FK → Staff
 changed_at            timestamp
@@ -1072,7 +1183,8 @@ RatePlan (1)
   ├── PackageInclusion (many)          bundled services + revenue split (+ PER_COUPLE)
   │
   ├── RatePlanPolicy (1)               operational rules
-  │     └── CancellationPolicy ─────→ reusable + hybrid + no_show_charge (single source)
+  │     ├── CancellationPolicy ──→ reusable cancel rules (cancellation only)
+  │     └── NoShowPolicy ────────→ reusable no-show rules (no-show only)
   │
   ├── RatePlanPayment (1)              collection method
   ├── RatePlanChannel (many)           channel_id FK → Channel (Entity 15, not enum)
@@ -1103,6 +1215,8 @@ on the Booking record. This snapshot is **never mutated** after creation.
   "cancellation_type": "FREE_UNTIL",
   "free_until_hours": 24,
   "no_show_charge": "FIRST_NIGHT",
+  "no_show_cut_off_time": "18:00",
+  "no_show_grace_period_minutes": 120,
   "deposit_percentage": 20,
   "currency_code": "LKR",
   "tax_profile_id": 3,
@@ -1253,11 +1367,11 @@ Packages        0             1            3            6+
 Derived Plans   0             1-2          4            8
 Audit log       auto          auto         auto         auto
 
-Entities used:  All 15        All 15       All 15       All 15
+Entities used:  All 17        All 17       All 17       All 17
 Fields used:    25%           55%          75%          100%
 ```
 
-Same 15 entities. Every hotel size. No schema changes between phases.
+Same 17 entities. Every hotel size. No schema changes between phases.
 
 ---
 
@@ -1291,7 +1405,8 @@ Same 15 entities. Every hotel size. No schema changes between phases.
 | RatePlan | name, code, template, meal_plan, pricing_model (PER_ROOM / PER_ADULT), visibility, status, is_active, currency_code |
 | RatePlanRoom | base_rate per room type (+ is_derived field even if derivation UI is Phase 2) |
 | RatePlanDateOverride | seasonal + holiday overrides + CTA/CTD fields |
-| CancellationPolicy | FREE_UNTIL / NON_REFUNDABLE / PARTIAL + date_change + no_show_charge |
+| CancellationPolicy | FREE_UNTIL / NON_REFUNDABLE / PARTIAL + date_change |
+| NoShowPolicy       | charge_type + cut_off_time + grace_period + auto_mark |
 | RatePlanPolicy | check-in/out, child policy, pet policy |
 | RatePlanPayment | all 4 collection types, deposit config |
 | RatePlanChannel | Direct + 2 OTA channels + channel_rate_plan_code |
@@ -1394,7 +1509,8 @@ STAFF & ROLES
 | 4 | RatePlanDayRule | 5-10 | Weekday multipliers (Phase 2) |
 | 5 | RatePlanLOSRule | 5-15 | Min/max stay + CTA/CTD (Phase 2) |
 | 6 | OccupancyPricing | 20 (5×4) | Extra guest charges (Phase 2) |
-| 7 | CancellationPolicy | 3-5 reusable | Cancel rules + no_show (single source) |
+| 7 | CancellationPolicy | 3-5 reusable | Cancel rules (cancellation only) |
+| 7b | NoShowPolicy | 2-3 reusable | No-show rules (separate from cancel) |
 | 8 | RatePlanPolicy | 5 | Check-in/out + child + pet policy |
 | 9 | RatePlanPayment | 5 | Payment collection config |
 | 10 | RatePlanChannel | 15-25 | Channel distribution via FK (not enum) |

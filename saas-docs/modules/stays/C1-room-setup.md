@@ -181,7 +181,7 @@ Multi-building properties: each building configured separately.
 
 ```
 id                → Unique identifier
-business_id         → Which hotel (multi-tenant isolation)
+business_id         → Which business (multi-tenant isolation)
 name              → "Main Block" / "Pool Wing" / "Garden Villas"
 code              → "MB" / "PW" (used in room numbering: PW-01, PW-02)
 display_order     → Controls order on floor map
