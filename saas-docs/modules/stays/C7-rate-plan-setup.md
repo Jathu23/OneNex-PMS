@@ -124,11 +124,64 @@ How the base rate is calculated depends on the property type:
 | Model | Meaning | Example |
 |---|---|---|
 | `PER_ROOM` | One price for the entire room regardless of occupancy | LKR 12,000 per room/night |
-| `PER_PERSON` | Price multiplied by number of guests | LKR 6,000 × 2 adults = LKR 12,000 |
-| `PER_ADULT` | Price multiplied by adults only (children may be separate) | LKR 6,500 × 2 = LKR 13,000 |
+| `PER_PERSON` | Price multiplied by number of guests | LKR 6,000 × 2 guests = LKR 12,000 |
+| `PER_ADULT` | Price multiplied by adults only (children may be separate) | LKR 6,500 × 2 adults = LKR 13,000 |
 
 Most hotels use `PER_ROOM`. Resorts and full-board properties often use `PER_PERSON`.
 The pricing model is set on the Rate Plan and applies to all room types under it.
+
+### How pricing_model and base_rate work together
+
+`base_rate` is stored once in `RatePlanRoom` (per room type). It is the **unit rate**.
+`pricing_model` tells the system what that unit means and how to calculate the final price.
+
+```
+final_price = base_rate × multiplier
+
+PER_ROOM   → multiplier = 1           (guest count has no effect on price)
+PER_PERSON → multiplier = guest_count
+PER_ADULT  → multiplier = adult_count
+```
+
+The final price is **not stored** — it is calculated at booking time using the stored
+base_rate and the guest count provided at the time of booking.
+
+```
+Example: base_rate = LKR 6,000, booking = 2 adults + 1 child
+
+PER_ROOM   → 6,000 × 1 = LKR 6,000   (flat, always)
+PER_PERSON → 6,000 × 3 = LKR 18,000  (all guests)
+PER_ADULT  → 6,000 × 2 = LKR 12,000  (adults only; child via OccupancyPricing)
+```
+
+### Setup order — pricing_model must come first
+
+`base_rate` meaning depends on `pricing_model`. Staff must select pricing_model
+**before** entering base_rate so they know what unit they are pricing.
+
+```
+Step 1 → Select pricing_model (PER_ROOM / PER_PERSON / PER_ADULT)
+Step 2 → Enter base_rate per room type
+
+UI label on base_rate field changes based on selection:
+  PER_ROOM   → "Rate per room / night"
+  PER_PERSON → "Rate per person / night"
+  PER_ADULT  → "Rate per adult / night"
+```
+
+### pricing_model is locked on ACTIVE plans
+
+Changing pricing_model after base_rate is set would make the stored value meaningless.
+
+```
+Example of the problem:
+  Staff sets base_rate = 6,000 as a per-person rate (PER_PERSON)
+  Staff changes pricing_model to PER_ROOM
+  System now charges LKR 6,000 flat for the entire room — wrong.
+```
+
+Rule: `pricing_model` **cannot be changed on an ACTIVE plan.**
+To change it: archive the plan and create a new one, or work in DRAFT before activation.
 
 ---
 

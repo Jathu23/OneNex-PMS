@@ -278,6 +278,9 @@ code:        required. UPPERCASE + underscore only. unique per hotel.
              Auto-generated: "BAR Standard" → "BAR_STANDARD"
              Owner can edit. System checks uniqueness on blur.
 pricing_model: required.
+              ⚠️  Must be selected BEFORE entering room prices in Step 4.
+              pricing_model determines what base_rate means (per room / per person / per adult).
+              Once plan is ACTIVE, pricing_model is locked and cannot be changed.
 meal_plan:   required.
 visibility:  required.
 ```
@@ -308,7 +311,11 @@ GET /rate-plans/check-code?code=BAR_STANDARD&hotel_id=123
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Room Prices                                                    │
-│  Set the base nightly rate for each room type.                  │
+│  Set the rate per adult / night for each room type.             │
+│  (label changes based on pricing_model selected in Step 3)      │
+│    PER_ROOM   → "Base Rate / Night"                             │
+│    PER_PERSON → "Rate per Person / Night"                       │
+│    PER_ADULT  → "Rate per Adult / Night"                        │
 │                                                                 │
 │  ┌──────────────────────────────┬──────────┬─────────────────┐  │
 │  │ Room Type                    │ Include? │ Base Rate/Night │  │
@@ -339,6 +346,13 @@ GET /rate-plans/check-code?code=BAR_STANDARD&hotel_id=123
 Owner enters each room type's base rate manually.
 Each room type can be included (✅) or excluded (unchecked).
 Excluded room types = this rate plan does not apply to that room type.
+
+The value entered is the UNIT RATE — its meaning depends on pricing_model:
+  PER_ROOM   → entered value = total room price (guest count has no effect)
+  PER_PERSON → entered value = per-person rate (system multiplies by guest count at booking)
+  PER_ADULT  → entered value = per-adult rate (system multiplies by adult count at booking)
+
+Final price is calculated at booking time, not stored.
 
 Validation:
   → If included: base_rate must be > 0.
