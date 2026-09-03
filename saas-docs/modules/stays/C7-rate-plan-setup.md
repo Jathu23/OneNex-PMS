@@ -68,7 +68,7 @@ USER B: Luxury Resort Revenue Manager
   → Needs full control of every rate logic
 ```
 
-Same 15 entities. Different depth of usage:
+Same 16 entities. Different depth of usage:
 
 ```
 SMALL GUESTHOUSE:                     LUXURY RESORT:
@@ -123,12 +123,18 @@ How the base rate is calculated depends on the property type:
 
 | Model | Meaning | Example |
 |---|---|---|
-| `PER_ROOM` | One price for the entire room regardless of occupancy | LKR 12,000 per room/night |
-| `PER_PERSON` | Price multiplied by number of guests | LKR 6,000 × 2 guests = LKR 12,000 |
-| `PER_ADULT` | Price multiplied by adults only (children may be separate) | LKR 6,500 × 2 adults = LKR 13,000 |
+| `PER_ROOM` | Flat price for the room. Guest count does not affect price. Extra guests charged via OccupancyPricing. | LKR 18,000/night flat |
+| `PER_ADULT` | Price multiplied by number of adults. Children always priced separately via OccupancyPricing. | LKR 6,500 × 2 adults = LKR 13,000 |
 
-Most hotels use `PER_ROOM`. Resorts and full-board properties often use `PER_PERSON`.
+Most hotels use `PER_ROOM`. Resorts and full-board properties use `PER_ADULT`.
 The pricing model is set on the Rate Plan and applies to all room types under it.
+
+**Why PER_PERSON was removed:**
+Industry research (OPERA, Mews, Apaleo, Cloudbeds) confirms that in every real PMS,
+"per person" pricing always means "per adult" in practice — children are never multiplied
+by the per-person rate. They are always priced separately via a child charge or age bucket.
+PER_PERSON and PER_ADULT are identical in behaviour. Keeping both creates confusion.
+PER_ADULT is the clearer term.
 
 ### How pricing_model and base_rate work together
 
@@ -138,20 +144,29 @@ The pricing model is set on the Rate Plan and applies to all room types under it
 ```
 final_price = base_rate × multiplier
 
-PER_ROOM   → multiplier = 1           (guest count has no effect on price)
-PER_PERSON → multiplier = guest_count
-PER_ADULT  → multiplier = adult_count
+PER_ROOM  → multiplier = 1            (guest count has no effect on room price)
+PER_ADULT → multiplier = adult_count  (children always via OccupancyPricing)
 ```
 
 The final price is **not stored** — it is calculated at booking time using the stored
 base_rate and the guest count provided at the time of booking.
 
-```
-Example: base_rate = LKR 6,000, booking = 2 adults + 1 child
+Children are NEVER multiplied by base_rate in either model. They are always priced
+via OccupancyPricing.extra_child_charge or AgeBucket (if configured).
 
-PER_ROOM   → 6,000 × 1 = LKR 6,000   (flat, always)
-PER_PERSON → 6,000 × 3 = LKR 18,000  (all guests)
-PER_ADULT  → 6,000 × 2 = LKR 12,000  (adults only; child via OccupancyPricing)
+```
+Example: 3 adults + 2 children, base_rate = LKR 6,500
+
+PER_ROOM  (base_adults = 2, extra_adult_charge = LKR 1,500, extra_child_charge = LKR 500):
+  Room base:      LKR 18,000  (flat)
+  Extra adult:    1 × LKR 1,500 = LKR 1,500
+  Extra children: 2 × LKR 500  = LKR 1,000
+  Total/night:    LKR 20,500
+
+PER_ADULT (extra_child_charge = LKR 500):
+  Adults:         3 × LKR 6,500 = LKR 19,500
+  Children:       2 × LKR 500   = LKR 1,000
+  Total/night:    LKR 20,500
 ```
 
 ### Setup order — pricing_model must come first
@@ -160,13 +175,12 @@ PER_ADULT  → 6,000 × 2 = LKR 12,000  (adults only; child via OccupancyPricing
 **before** entering base_rate so they know what unit they are pricing.
 
 ```
-Step 1 → Select pricing_model (PER_ROOM / PER_PERSON / PER_ADULT)
+Step 1 → Select pricing_model (PER_ROOM / PER_ADULT)
 Step 2 → Enter base_rate per room type
 
 UI label on base_rate field changes based on selection:
-  PER_ROOM   → "Rate per room / night"
-  PER_PERSON → "Rate per person / night"
-  PER_ADULT  → "Rate per adult / night"
+  PER_ROOM  → "Rate per room / night"
+  PER_ADULT → "Rate per adult / night"
 ```
 
 ### pricing_model is locked on ACTIVE plans
@@ -221,7 +235,9 @@ template_type
   starting point — used in audit logs and UI display only.
   Template definitions change via code deploy, not DB migration.
 
-pricing_model         PER_ROOM / PER_PERSON / PER_ADULT
+pricing_model         PER_ROOM / PER_ADULT
+                      PER_ROOM  = flat room price. Extra guests via OccupancyPricing.
+                      PER_ADULT = price × adult count. Children always via OccupancyPricing.
 
 meal_plan
   → ROOM_ONLY         No meals included
@@ -463,27 +479,113 @@ Both are checked independently. Either being true = booking blocked.
 ### Entity 6: `OccupancyPricing` — Extra Guest Charges
 
 What to charge when a room has more guests than the base occupancy.
+Also defines how many guests are included in the base room rate.
 
 ```
 id
 rate_plan_id          FK → RatePlan
 room_type_id          FK → RoomType nullable. null = applies to all room types.
 
-extra_adult_charge    decimal nullable. Per additional adult per night.
-extra_child_charge    decimal nullable. Per additional child per night.
+base_adults           int. default 2. How many adults are included in base_rate.
+                      Extra adults beyond this count = extra_adult_charge applies.
+                      Industry default = 2 (double occupancy as baseline).
+
+base_children         int. default 0. How many children are included in base_rate.
+                      Extra children beyond this count = extra_child_charge applies.
+                      Most hotels set this to 0 (children always charged extra).
+
+extra_adult_charge    decimal nullable. Per additional adult per night,
+                      beyond base_adults count.
+
+extra_child_charge    decimal nullable. Flat charge per child per night.
+                      Used as fallback when no AgeBucket is configured.
+                      If AgeBucket records exist for this rate plan → AgeBucket wins.
+
 child_age_limit       int nullable. "Child" is anyone up to this age.
-                      Child above limit = treated as adult.
+                      Guest above this age = treated as adult for pricing.
 
 max_occupancy_override  int nullable. Allows this rate plan to override
                         the room type's max occupancy.
-                        Example: Room type max = 3. Corporate rate allows up to 2.
+                        Example: Room type max = 5. Corporate rate allows up to 3.
 ```
 
-**Phase 2.** V1 uses base rate for all occupancy levels.
+**Calculation logic — PER_ROOM example:**
+```
+base_adults = 2, base_rate = LKR 18,000
+extra_adult_charge = LKR 1,500, extra_child_charge = LKR 500
+
+Booking: 3 adults + 2 children
+  Room base:      LKR 18,000         (covers 2 base adults)
+  Extra adult:    1 × LKR 1,500      (3rd adult beyond base_adults = 2)
+  Children:       2 × LKR 500        (no children in base_children = 0)
+  Total/night:    LKR 20,500
+```
+
+**Child charge fallback rule:**
+```
+if AgeBucket records exist for this rate plan:
+    use AgeBucket rate matched to child's age
+else:
+    use extra_child_charge flat rate
+```
+This makes age bucket configuration optional. Small hotels set one flat extra_child_charge.
+Resorts configure AgeBuckets for age-tiered pricing. Both work with the same entity.
 
 ---
 
-### Entity 7: `CancellationPolicy` — Reusable Cancel Rules
+### Entity 7: `AgeBucket` — Age-Tiered Child Pricing
+
+Optional. When configured, overrides OccupancyPricing.extra_child_charge for children
+whose age falls within the bucket. Allows different rates for infants, children, and teens.
+
+If NO AgeBucket records exist for a rate plan → flat extra_child_charge applies (fallback).
+If AgeBucket records exist → system matches child's age and applies that bucket's charge.
+
+```
+id
+rate_plan_id          FK → RatePlan
+room_type_id          FK → RoomType nullable. null = applies to all room types.
+
+bucket_name           "Infant" / "Child" / "Teen"
+min_age               int. Minimum age (inclusive) for this bucket.
+max_age               int. Maximum age (inclusive) for this bucket.
+charge_per_night      decimal. 0.00 = free. Set per bucket.
+
+is_active             bool.
+```
+
+**Industry standard age tiers (recommended defaults, configurable):**
+```
+Bucket      min_age   max_age   charge
+──────────────────────────────────────────
+Infant        0         2        0.00  (free — no bed, no occupancy count)
+Child         3        11       LKR 500
+Teen         12        17       LKR 1,200
+```
+
+**How it replaces flat extra_child_charge:**
+```
+Booking: 2 children — age 1 (infant) + age 8 (child)
+
+With AgeBucket:
+  Age 1 → Infant bucket → LKR 0
+  Age 8 → Child bucket  → LKR 500
+  Child total: LKR 500
+
+Without AgeBucket (flat):
+  extra_child_charge = LKR 500
+  Both children → 2 × LKR 500 = LKR 1,000
+```
+
+**Business user — optional setup:**
+```
+Small hotel → skip AgeBucket entirely. Set one flat extra_child_charge. Done.
+Resort      → configure 3 buckets. System auto-applies correct rate per child age.
+```
+
+---
+
+### Entity 8: `CancellationPolicy` — Reusable Cancel Rules
 
 **Single source of truth for all cancellation and no-show rules.**
 Created once → reused across many rate plans.
@@ -546,7 +648,7 @@ Single source: CancellationPolicy. Never in RatePlanPolicy.
 
 ---
 
-### Entity 8: `RatePlanPolicy` — Operational Rules
+### Entity 9: `RatePlanPolicy` — Operational Rules
 
 Check-in/out times, child policy, pet policy for this specific rate plan.
 Overrides hotel-level defaults where needed.
@@ -591,7 +693,7 @@ If any level says no → pet not permitted.
 
 ---
 
-### Entity 9: `RatePlanPayment` — Payment Collection Config
+### Entity 10: `RatePlanPayment` — Payment Collection Config
 
 How and when payment is collected for bookings under this rate plan.
 
@@ -623,7 +725,7 @@ refund_policy_days    int nullable. Days within which refund is processed.
 
 ---
 
-### Entity 10: `RatePlanChannel` — Channel Distribution
+### Entity 11: `RatePlanChannel` — Channel Distribution
 
 Controls which channels (OTAs, direct) sell this rate plan.
 Each row = one rate plan × one channel combination.
@@ -658,7 +760,7 @@ is_active             bool. Enable/disable this channel without deleting the rec
 
 ---
 
-### Entity 11: `RateParity` — Price Consistency Monitoring
+### Entity 12: `RateParity` — Price Consistency Monitoring
 
 Monitors that this rate plan's price doesn't appear cheaper on OTAs than on the hotel's
 direct channel. Protects direct booking margin.
@@ -728,7 +830,7 @@ last_violation_detected_at   = current timestamp  // only when a violation occur
 One important dependency: you need a mapping between your internal RatePlan / RoomType and each OTA’s rate and room identifiers. Without that mapping, the system cannot reliably compare the correct products.
 ---
 
-### Entity 12: `DerivedRatePlan` — Auto-Cascade Pricing
+### Entity 13: `DerivedRatePlan` — Auto-Cascade Pricing
 
 Defines how one rate plan is automatically calculated from another.
 The child rate plan's prices update automatically when the parent changes.
@@ -782,7 +884,7 @@ Prevention: Before every DerivedRatePlan save, application checks:
 
 ---
 
-### Entity 13: `PackageInclusion` — Bundled Services
+### Entity 14: `PackageInclusion` — Bundled Services
 
 Defines what is included in a package rate plan beyond just the room.
 Controls how inclusions appear on folio, trigger housekeeping tasks,
@@ -850,7 +952,7 @@ Setup once → auto-splits forever.
 
 ---
 
-### Entity 14: `RatePlanAuditLog` — Full Change History
+### Entity 15: `RatePlanAuditLog` — Full Change History
 
 Every change to every rate plan is recorded. Who changed what, when, and why.
 Also shows how many future bookings are affected before confirming the change.
@@ -900,7 +1002,7 @@ SCENARIO 3: OTA dispute
 
 ---
 
-### Entity 15: `Channel` — Distribution Channel Master Table
+### Entity 16: `Channel` — Distribution Channel Master Table
 
 Master table of all distribution channels. Replaces hardcoded enum in `RatePlanChannel`.
 Adding a new OTA = insert one row. Zero code change. Zero deployment.
@@ -1049,9 +1151,11 @@ STEP 4: LOS Rule check
 STEP 5: CTA check
   Dec 20 closed_to_arrival = false → check-in allowed ✅
 
-STEP 6: Occupancy (OccupancyPricing)
-  2 adults = base (PER_ROOM — no extra adult charge)
-  1 child (age 8, within child_age_limit 12) → LKR 500/night × 3 = LKR 1,500
+STEP 6: Occupancy (OccupancyPricing + AgeBucket)
+  base_adults = 2. Booking has 2 adults → no extra adult charge.
+  1 child (age 8):
+    AgeBucket configured? YES → Child bucket (3–11 yrs) → LKR 500/night
+    3 nights × LKR 500 = LKR 1,500
 
 STEP 7: Package inclusions (PackageInclusion)
   Full board: included in rate (no extra charge)
@@ -1184,7 +1288,7 @@ Same 15 entities. Every hotel size. No schema changes between phases.
 
 | Entity | V1 Fields |
 |---|---|
-| RatePlan | name, code, template, meal_plan, pricing_model, visibility, status, is_active, currency_code |
+| RatePlan | name, code, template, meal_plan, pricing_model (PER_ROOM / PER_ADULT), visibility, status, is_active, currency_code |
 | RatePlanRoom | base_rate per room type (+ is_derived field even if derivation UI is Phase 2) |
 | RatePlanDateOverride | seasonal + holiday overrides + CTA/CTD fields |
 | CancellationPolicy | FREE_UNTIL / NON_REFUNDABLE / PARTIAL + date_change + no_show_charge |
@@ -1194,13 +1298,14 @@ Same 15 entities. Every hotel size. No schema changes between phases.
 | RatePlanAuditLog | all changes auto-logged (no UI needed in V1) |
 | PackageInclusion | Room Only + Breakfast only (basic packages) |
 | Channel | Seed 7 standard channels at startup |
+| OccupancyPricing | base_adults (default 2), base_children (default 0), extra_adult_charge, extra_child_charge, child_age_limit |
+| AgeBucket | Optional. Infant / Child / Teen buckets. Falls back to extra_child_charge if not configured. |
 
 **Phase 2:**
 
 ```
 → RatePlanDayRule           weekend/weekday auto-multiplier
 → RatePlanLOSRule           min/max stay + arrival days + CTA/CTD
-→ OccupancyPricing          extra adult + child charges
 → DerivedRatePlan           corporate auto-cascade from BAR
 → PackageInclusion full      bundle + revenue split by department
 → RateParity                monitoring + GM alerts

@@ -277,9 +277,10 @@ name:        required. min 3 chars. max 100 chars.
 code:        required. UPPERCASE + underscore only. unique per hotel.
              Auto-generated: "BAR Standard" → "BAR_STANDARD"
              Owner can edit. System checks uniqueness on blur.
-pricing_model: required.
+pricing_model: required.  PER_ROOM / PER_ADULT  (PER_PERSON removed — identical to PER_ADULT
+              in all real hotel systems; children are never multiplied by per-person rate).
               ⚠️  Must be selected BEFORE entering room prices in Step 4.
-              pricing_model determines what base_rate means (per room / per person / per adult).
+              pricing_model determines what base_rate means (per room flat / per adult).
               Once plan is ACTIVE, pricing_model is locked and cannot be changed.
 meal_plan:   required.
 visibility:  required.
@@ -311,11 +312,10 @@ GET /rate-plans/check-code?code=BAR_STANDARD&hotel_id=123
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Room Prices                                                    │
-│  Set the rate per adult / night for each room type.             │
+│  Set the rate for each room type.                               │
 │  (label changes based on pricing_model selected in Step 3)      │
-│    PER_ROOM   → "Base Rate / Night"                             │
-│    PER_PERSON → "Rate per Person / Night"                       │
-│    PER_ADULT  → "Rate per Adult / Night"                        │
+│    PER_ROOM  → "Rate per Room / Night"                          │
+│    PER_ADULT → "Rate per Adult / Night"                         │
 │                                                                 │
 │  ┌──────────────────────────────┬──────────┬─────────────────┐  │
 │  │ Room Type                    │ Include? │ Base Rate/Night │  │
