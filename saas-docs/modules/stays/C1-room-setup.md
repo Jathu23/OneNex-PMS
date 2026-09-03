@@ -56,12 +56,11 @@ Same system. Same entities. Different depth of usage.
 SMALL GUESTHOUSE:                    LUXURY RESORT:
 Fill 4 fields → done.                Fill 30+ fields → full control.
 
-RoomType: name, bed_type,            RoomType: name, code, description,
+RoomType: name, bed arrangement,     RoomType: name, code, description,
           max_adults, base_rate                 category, view_type,
-                                               bed_type, flexible config,
-Room: room_number, floor,                      occupancy, size, smoking,
-      room_type                                amenities, translations,
-                                               photos, OTA mapping
+                                               bed arrangements, occupancy,
+Room: room_number, floor,                      size, smoking, amenities,
+      room_type                                translations, photos, OTA mapping
 
 System hides everything else.        System shows everything.
 ```
@@ -95,7 +94,7 @@ Room Type = a mold. Define once. Apply to many rooms.
 
 Example: "Standard Double"
   → Max 2 adults, 1 child
-  → Queen bed
+  → 1 Queen bed (160×200 cm)
   → 320 sq ft
   → Non-smoking
   → Amenities: AC, TV, WiFi, Hot water
@@ -248,9 +247,10 @@ max_occupancy         → Total people allowed (adults + children combined)
 
 -- PHYSICAL --
 size_sqft             → nullable. Room size shown on OTA listing.
-bed_type              → KING / QUEEN / TWIN / DOUBLE / BUNK
-bed_config_flexible   → bool. Can TWIN convert to KING?
-                        If true: room offered as both twin and king option.
+
+-- Bed config: NOT stored here. Managed via BedArrangement + BedConfiguration entities.
+-- See Entity 10 (BedSizeOption), Entity 11 (BedArrangement), Entity 12 (BedConfiguration),
+-- Entity 13 (RoomExtraBed), Entity 14 (RoomBedOverride).
 
 -- POLICY --
 smoking_policy        → SMOKING / NON_SMOKING / BOTH
@@ -287,8 +287,8 @@ created_at / updated_at / created_by / updated_by
 ```
 
 ```
-Simple hotel: name, bed_type, max_adults, base_rate → done in 2 minutes.
-Luxury hotel: all fields, translations, multiple rate plans, full amenity config.
+Simple hotel: name, max_adults, base_rate → add 1 bed config → done in 2 minutes.
+Luxury hotel: all fields, multiple bed arrangements, translations, full amenity config.
 ```
 
 ---
@@ -326,6 +326,10 @@ view_type_override        → nullable enum (CITY/OCEAN/GARDEN/POOL/MOUNTAIN/NON
                             Set when one specific room faces a different direction.
                             e.g. Type = "Ocean View" but room 104 faces car park
                             → Override: NONE (prevents wrong OTA listing)
+
+-- Bed override: NOT stored here. Managed via RoomBedOverride entity (Entity 14).
+-- Use when one specific room's beds differ from room type default.
+-- e.g. Type allows King/Twin arrangement, but Room 304 has wall-mounted beds → King only.
 
 -- ACCESSIBILITY --
 is_accessible_override    → nullable bool.
@@ -372,31 +376,48 @@ Phase 2: RoomBlock entity (date-ranged, auto-release).
 
 ---
 
-### Entity 5: `Amenity`
+### Entity 5: `AmenityCategory` — System Level Category Master
 
-**Purpose:** Master list of all amenities this hotel offers.
-Defined once. Reused across all room types.
-Like a dictionary — define a word once, reference it everywhere.
+**Purpose:** System-seeded master list of amenity categories.
+Business cannot add or remove categories. Fixed set — used to organise amenities in UI and filter display.
 
 ```
 id
-hotel_id              → Each hotel has their own amenity list
-name                  → "Air Conditioning" / "Rainshower" / "Nespresso Machine"
-short_code            → "AC" / "RAIN" (floor map, reports)
-category              → COMFORT / TECH / BATHROOM / VIEW / FOOD / SAFETY / OUTDOOR / PET / ACCESSIBILITY
-icon                  → "snowflake" / "wifi" / "paw" (icon library name)
-                        Shown as icon on booking widget.
-ota_mapping_code      → JSON nullable.
-                        OTAs use their own internal amenity IDs for API sync.
-                        {"booking_com": "107", "expedia": "2001", "agoda": "55"}
-                        null = amenity not pushed to OTA (internal label only).
-                        Required when Channel Manager (A1) add-on is enabled.
-                        Without this: amenity exists in PMS but never reaches OTA.
-is_active             → bool. Soft delete — preserve history.
-created_at / updated_at / created_by / updated_by
+name              "COMFORT" / "TECH" / "BATHROOM" / "VIEW" /
+                  "FOOD" / "SAFETY" / "OUTDOOR" / "PET" / "ACCESSIBILITY"
+icon              text nullable. Icon library name. "sofa" / "wifi" / "shower"
+                  Shown as category header icon in amenity setup UI.
+icon_path         text nullable. Custom image path if icon library name not sufficient.
+                  e.g. "/icons/categories/accessibility.svg"
+                  null = use icon field (library name). Both can exist; icon_path takes priority.
+display_order     int. Order categories appear in setup UI and booking widget.
 ```
 
-**Standard amenities pre-loaded by property template:**
+---
+
+### Entity 6: `Amenity` — System Level Amenity Master
+
+**Purpose:** System-seeded master list of common amenities. No business_id here.
+All businesses see this list and select from it.
+
+```
+id
+category_id       FK → AmenityCategory
+name              "Air Conditioning" / "WiFi" / "Rainshower" / "Nespresso Machine"
+short_code        "AC" / "WIFI" / "RAIN"
+icon              text nullable. Icon library name. "snowflake" / "wifi" / "shower"
+                  Shown as amenity icon in booking widget and setup UI.
+icon_path         text nullable. Custom image path.
+                  e.g. "/icons/amenities/air-conditioning.svg"
+                  null = use icon field. Both can exist; icon_path takes priority.
+ota_mapping_code  JSON nullable.
+                  OTAs use their own internal amenity IDs for API sync.
+                  {"booking_com": "107", "expedia": "2001", "agoda": "55"}
+                  null = amenity not pushed to OTA (internal label only).
+                  Required when Channel Manager (A1) add-on is enabled.
+```
+
+**System-seeded amenities:**
 ```
 COMFORT:       Air Conditioning, Heating, Fan, Blackout Curtains
 TECH:          Smart TV, WiFi, Bluetooth Speaker, USB Charging Ports
@@ -415,21 +436,95 @@ ACCESSIBILITY: Grab Bars, Roll-in Shower, Wide Doorway (90cm+),
 Amenity.ota_mapping_code carries the OTA-specific code for each feature.
   "Grab Bars" → {"booking_com": "445", "expedia": "2201"}
 
-This means:
-  Staff checks "Grab Bars" on room type → auto-syncs to OTA with correct code.
-  JSON field on Room → no ota_mapping_code → OTA sync impossible.
-
-Hotel marks accessible room type → is_accessible = true (OTA filter).
-Hotel marks specific features → RoomTypeAmenity (ACCESSIBILITY category).
-Room exception → RoomAmenityOverride (same as any other amenity).
+Staff checks "Grab Bars" on room type → auto-syncs to OTA with correct code.
+JSON field on Room → no ota_mapping_code → OTA sync impossible.
 ```
 
 ---
 
-### Entity 6: `RoomTypeAmenity`
+### Entity 7: `BusinessAmenity` — Business Level Amenity List
+
+**Purpose:** Each business builds their own amenity list by:
+1. Selecting from system amenities (Scenario 1)
+2. Creating custom amenity under a system category (Scenario 2)
+3. Creating custom amenity with custom category (Scenario 3)
+
+```
+id
+business_id           FK → Business
+
+-- Scenario 1: selected from system list
+amenity_id            FK → Amenity nullable
+                      set  = linked to system amenity
+                      null = custom amenity (scenarios 2 & 3)
+
+-- Scenario 2 & 3: custom amenity details
+name                  text nullable
+                      Scenario 1 → null (use Amenity.name)
+                      Scenario 2 & 3 → business enters their own name
+
+icon                  text nullable. Icon library name for custom amenity.
+icon_path             text nullable. Custom image path for custom amenity.
+                      null = use icon field. Both can exist; icon_path takes priority.
+
+-- Scenario 2: custom amenity under system category
+category_id           FK → AmenityCategory nullable
+                      Scenario 1 → null (inherited from Amenity.category_id)
+                      Scenario 2 → business picks from system categories
+                      Scenario 3 → null (use custom_category_name)
+
+-- Scenario 3: custom amenity + custom category
+custom_category_name  text nullable
+                      null for scenarios 1 & 2.
+                      Scenario 3 → business enters their own category name.
+
+ota_mapping_code      JSON nullable.
+                      Scenario 1 → inherited from Amenity.ota_mapping_code
+                      Scenario 2 & 3 → business fills manually or null (internal only)
+
+is_active             bool. Soft delete.
+```
+
+**Which scenario applies — rules:**
+```
+amenity_id set                          → Scenario 1 (system amenity selected)
+amenity_id null + category_id set       → Scenario 2 (custom name, system category)
+amenity_id null + category_id null      → Scenario 3 (fully custom)
+```
+
+**Full list query for a business:**
+```sql
+SELECT
+  ba.id,
+  COALESCE(a.name,             ba.name)                AS amenity_name,
+  COALESCE(ac.name,            ba.custom_category_name) AS category_name,
+  COALESCE(a.icon,             ba.icon)                AS icon,
+  COALESCE(a.icon_path,        ba.icon_path)           AS icon_path,
+  COALESCE(a.ota_mapping_code, ba.ota_mapping_code)    AS ota_mapping_code
+FROM BusinessAmenity ba
+LEFT JOIN Amenity a          ON ba.amenity_id = a.id
+LEFT JOIN AmenityCategory ac ON COALESCE(a.category_id, ba.category_id) = ac.id
+WHERE ba.business_id = 42
+  AND ba.is_active = true
+ORDER BY ac.display_order, amenity_name
+```
+
+**Why ACCESSIBILITY uses Amenity system (not a JSON field on Room):**
+```
+BusinessAmenity.ota_mapping_code (inherited from Amenity) carries the OTA code.
+  "Grab Bars" → {"booking_com": "445", "expedia": "2201"}
+
+Hotel marks accessible room type → is_accessible = true (OTA filter).
+Hotel marks specific features    → RoomTypeAmenity (ACCESSIBILITY category).
+Room exception                   → RoomAmenityOverride.
+```
+
+---
+
+### Entity 8: `RoomTypeAmenity`
 
 **Purpose:** Defines which amenities each room TYPE has as defaults.
-Junction table: links RoomType to Amenity.
+Junction table: links RoomType to BusinessAmenity.
 
 **Why explicit YES and NO (not just skipping the record):**
 ```
@@ -439,14 +534,14 @@ Explicit has_amenity = false = NO.
 ```
 
 ```
-room_type_id      FK → RoomType   ↘
-amenity_id        FK → Amenity    → Composite primary key
-has_amenity       → bool. YES or NO for this amenity on this type.
-value             → text nullable. Extra detail.
-                    WiFi → "100 Mbps"
-                    TV   → "55 inch Smart TV"
-                    AC   → null (yes/no is enough)
-                    Shown at booking: "WiFi — 100 Mbps"
+room_type_id          FK → RoomType        ↘
+business_amenity_id   FK → BusinessAmenity → Composite primary key
+has_amenity           bool. YES or NO for this amenity on this room type.
+value                 text nullable. Extra detail.
+                      WiFi → "100 Mbps"
+                      TV   → "55 inch Smart TV"
+                      AC   → null (yes/no is enough)
+                      Shown at booking: "WiFi — 100 Mbps"
 ```
 
 **Example records:**
@@ -457,28 +552,29 @@ Standard Double  AC               true          null
 Standard Double  Mini Bar         false         null
 Standard Double  WiFi             true          "50 Mbps"
 Standard Double  Pet Friendly     false         null
-Deluxe           AC               true          null
-Deluxe           Mini Bar         true          null
-Deluxe           WiFi             true          "100 Mbps"
+Deluxe King      AC               true          null
+Deluxe King      Mini Bar         true          null
+Deluxe King      WiFi             true          "100 Mbps"
 Garden Suite     Pet Friendly     true          null
 ```
 
 ---
 
-### Entity 7: `RoomAmenityOverride`
+### Entity 9: `RoomAmenityOverride`
 
 **Purpose:** Room-specific exception from type default.
 Stored ONLY when ONE specific room differs from its type.
 Zero records for rooms with no exceptions → clean, efficient.
 
 ```
-room_id           FK → Room    ↘
-amenity_id        FK → Amenity → Composite primary key
-has_amenity       → Override value. Replaces type default for this room only.
-value             → Override detail ("50 Mbps" when type has "100 Mbps")
-reason            → text nullable. Internal. Why is this room different?
-                    "WiFi extender not installed in this corner"
-                    "Balcony sealed — safety repair pending"
+room_id               FK → Room            ↘
+business_amenity_id   FK → BusinessAmenity → Composite primary key
+has_amenity           bool. Override value. Replaces type default for this room only.
+value                 text nullable. Override detail.
+                      "50 Mbps" when type has "100 Mbps"
+reason                text nullable. Internal staff note. Why is this room different?
+                      "WiFi extender not installed in this corner"
+                      "Balcony sealed — safety repair pending"
 ```
 
 **Query logic (runs at booking, OTA sync, checklist):**
@@ -494,7 +590,197 @@ reason            → text nullable. Internal. Why is this room different?
 
 ---
 
-### Entity 8: `RoomPhoto`
+### Entity 10: `BedSizeOption` — System Level Standard Sizes
+
+**Purpose:** System-seeded standard bed dimensions per bed type.
+Business selects from this list when configuring beds. Custom size = override fields.
+
+```
+id
+bed_type          KING / QUEEN / DOUBLE / SINGLE /
+                  BUNK / SOFA_BED / FUTON / TATAMI
+label             "Standard" / "US King" / "Compact King"
+width_cm          int
+length_cm         int
+is_default        bool. Which size pre-selects automatically when bed_type chosen.
+display_order     int
+```
+
+**System-seeded sizes:**
+```
+KING     → Standard (180×200, default) | US King (193×203) | Compact (170×200)
+QUEEN    → Standard (160×200, default) | US Queen (153×203)
+DOUBLE   → Standard (140×200, default)
+SINGLE   → Standard (90×200,  default) | Compact (80×190)
+BUNK     → Standard (90×190,  default)
+SOFA_BED → Standard (120×190, default) | Single Sofa (90×180)
+FUTON    → Standard (100×200, default)
+TATAMI   → Standard (100×200, default)
+```
+
+---
+
+### Entity 11: `BedArrangement` — Convertible Bed Setup Options
+
+**Purpose:** Defines different ways the beds in a room type can be arranged.
+Only needed when the same physical beds can be set up in multiple ways.
+One arrangement = one way to configure the beds before guest arrival.
+
+```
+id
+room_type_id      FK → RoomType
+name              "King Setup" / "Twin Setup" / "Standard"
+is_default        bool. Which arrangement shows first at booking.
+display_order     int
+```
+
+**When to use:**
+```
+Room has 2 single beds that can be joined:
+  BedArrangement: "King Setup"   is_default: true
+  BedArrangement: "Twin Setup"   is_default: false
+
+Room has fixed beds (no conversion possible):
+  BedArrangement: "Standard"     is_default: true   ← one arrangement only
+  UI hides arrangement selector at booking — guest just sees bed info.
+```
+
+---
+
+### Entity 12: `BedConfiguration` — Actual Beds Per Arrangement
+
+**Purpose:** Defines the actual beds in each BedArrangement.
+One-to-many: one arrangement can have multiple bed types (e.g. 1 King + 2 Singles).
+
+```
+id
+room_type_id        FK → RoomType
+bed_arrangement_id  FK → BedArrangement
+
+bed_type            KING / QUEEN / DOUBLE / SINGLE /
+                    BUNK / SOFA_BED / FUTON / TATAMI
+bed_count           int. How many beds of this type in this arrangement.
+
+bed_size_option_id  FK → BedSizeOption nullable
+                    set  = standard size selected from list
+                    null = custom size (use width_cm + length_cm)
+
+width_cm            int nullable. Custom width. Used when bed_size_option_id = null.
+length_cm           int nullable. Custom length. Used when bed_size_option_id = null.
+```
+
+**Examples:**
+```
+Family Suite — 1 arrangement (fixed, no conversion):
+  BedArrangement: "Standard"
+    BedConfiguration row 1: KING   × 1, 180×200
+    BedConfiguration row 2: SINGLE × 2, 90×200
+
+Deluxe Room — 2 arrangements (convertible):
+  BedArrangement: "King Setup"
+    BedConfiguration row 1: KING   × 1, 180×200
+  BedArrangement: "Twin Setup"
+    BedConfiguration row 1: SINGLE × 2, 90×200
+```
+
+**OTA display — auto generated from rows:**
+```
+Family Suite  → "1 King bed (180×200 cm) + 2 Single beds (90×200 cm)"
+Deluxe Room   → "King bed (180×200 cm) or 2 Single beds (90×200 cm)"
+Dormitory     → "6 Bunk beds (90×190 cm)"
+```
+
+**Booking UI:**
+```
+One arrangement only   → show bed info as text. No selector shown.
+Multiple arrangements  → show "Bed Arrangement" selector.
+
+Deluxe Room:
+  Bed Arrangement:
+  ● King bed (180×200 cm)      ← default
+  ○ 2 Single beds (90×200 cm)
+```
+
+**Housekeeping instruction — auto generated:**
+```
+Guest selected "King Setup" → housekeeping board shows:
+  Room 304 | Arrival Oct 5 | "Join the two single beds"
+
+Guest selected "Twin Setup" → housekeeping board shows:
+  Room 304 | Arrival Oct 5 | "Separate the beds"
+```
+
+---
+
+### Entity 13: `RoomExtraBed` — Add-on Beds at Booking Time
+
+**Purpose:** Extra beds that can be added to a room at booking time on request.
+These are not permanently in the room — staff brings them in for the stay.
+
+```
+id
+room_type_id        FK → RoomType
+extra_bed_type      ROLLAWAY / BABY_COT / SOFA_BED
+max_extra_beds      int. Maximum number of this extra bed type allowed in the room.
+charge_per_night    decimal. 0.00 = free.
+is_available        bool.
+```
+
+**Booking UI:**
+```
+Extra beds (optional):
+  [ ] Rollaway bed   + LKR 500/night
+  [ ] Baby cot       Free
+```
+
+**Housekeeping task — auto generated:**
+```
+Booking has baby cot request → housekeeping board:
+  Room 304 | Arrival Oct 5 | "Place baby cot in room"
+```
+
+---
+
+### Entity 14: `RoomBedOverride` — Room-Level Bed Exception
+
+**Purpose:** When one specific physical room's beds differ from its room type defaults.
+Stored ONLY when a specific room differs. Zero records = inherit from type.
+Consistent with RoomAmenityOverride pattern.
+
+```
+id
+room_id                   FK → Room
+
+-- Option A: disable a specific arrangement for this room
+disabled_arrangement_id   FK → BedArrangement nullable
+                          "Room 304 cannot do King Setup — wall-mounted beds"
+
+-- Option B: override the entire bed config for this room
+override_bed_type         enum nullable
+override_bed_count        int nullable
+override_width_cm         int nullable
+override_length_cm        int nullable
+
+reason                    text nullable. Internal staff note.
+                          "Wall-mounted beds — cannot join"
+                          "Beds replaced with King during Oct 2025 renovation"
+```
+
+**Query logic (runs at booking, room assignment):**
+```
+"What bed arrangements are available for Room 304?"
+
+1. Get all BedArrangements for Room 304's RoomType
+2. Get all RoomBedOverride for Room 304
+3. Remove disabled arrangements
+4. Apply any bed config overrides
+
+Result → show only valid options to guest at booking
+```
+
+---
+
+### Entity 15: `RoomPhoto`
 
 **Purpose:** Photos for each room type.
 Upload once → system auto-generates all OTA-specific format/size versions.
@@ -543,7 +829,7 @@ Format:           JPG, PNG, WEBP accepted
 
 ---
 
-### Entity 9: `ConnectingRoom`
+### Entity 16: `ConnectingRoom`
 
 **Purpose:** Records physical rooms that have connecting doors between them.
 Used for family bookings, group requests needing adjacent rooms.
@@ -578,7 +864,7 @@ System:
 
 ---
 
-### Entity 10: `RoomSetupProgress`
+### Entity 17: `RoomSetupProgress`
 
 **Purpose:** Tracks setup completion. Auto-calculated score.
 Blocks OTA connection and go-live if minimum threshold not met.
@@ -621,7 +907,7 @@ Room Setup: 73% complete
 
 ---
 
-### Entity 11: `RoomTypeTranslation`
+### Entity 18: `RoomTypeTranslation`
 
 **Purpose:** Multi-language support for room type names and descriptions.
 Required for OTA listings in different languages and multi-language guest portals.
@@ -752,11 +1038,11 @@ ConnectingRooms     0             4 pairs      20 pairs     40+ pairs
 Translations        English       English      EN + SI      EN + SI + TA + ZH
 Pet rooms           0             5            20           30+
 
-Entities used:      All 11        All 11       All 11       All 11
+Entities used:      All 18        All 18       All 18       All 18
 Fields used:        20%           50%          75%          100%
 ```
 
-Same 11 entities. Every hotel size. No schema changes between phases.
+Same 18 entities. Every hotel size. No schema changes between phases.
 
 ---
 
@@ -764,26 +1050,33 @@ Same 11 entities. Every hotel size. No schema changes between phases.
 
 ```
 MUST HAVE — V1 (hotel cannot operate without):
-  ✅ RoomType          → name, category, max_adults, max_children,
-                         max_occupancy, bed_type, base_rate (reference only),
-                         is_pet_friendly, view_type, is_active
-  ✅ Room              → room_number, room_type_id, floor_id,
-                         is_accessible, internal_notes,
-                         is_pet_friendly_override, view_type_override,
-                         is_active (OOO via manual toggle in V1)
-  ✅ Building          → auto-created, single hotel
-  ✅ Floor             → floor_number
-  ✅ Amenity           → master list (pre-loaded by template) + ota_mapping_code
-  ✅ RoomTypeAmenity   → has_amenity bool + value (both required)
-  ✅ RoomPhoto         → photo_type per photo, min 3 per type, go-live blocked otherwise
-  ✅ ConnectingRoom    → simple pair mapping
-  ✅ RoomSetupProgress → completion score + blocking logic
+  ✅ RoomType            → name, category, max_adults, max_children,
+                           max_occupancy, base_rate (reference only),
+                           is_pet_friendly, view_type, is_active
+  ✅ Room                → room_number, room_type_id, floor_id,
+                           is_accessible, internal_notes,
+                           is_pet_friendly_override, view_type_override,
+                           is_active (OOO via manual toggle in V1)
+  ✅ Building            → auto-created, single hotel
+  ✅ Floor               → floor_number
+  ✅ AmenityCategory     → system seeded, icon + icon_path
+  ✅ Amenity             → system seeded, icon + icon_path, ota_mapping_code
+  ✅ BusinessAmenity     → select from system + custom amenities (all 3 scenarios)
+  ✅ RoomTypeAmenity     → has_amenity bool + value (both required)
+  ✅ BedSizeOption       → system seeded standard sizes per bed type
+  ✅ BedArrangement      → at least 1 per room type required (even if only "Standard")
+  ✅ BedConfiguration    → at least 1 row per arrangement required
+  ✅ RoomExtraBed        → optional per room type (rollaway, baby cot)
+  ✅ RoomPhoto           → photo_type per photo, min 3 per type, go-live blocked otherwise
+  ✅ ConnectingRoom      → simple pair mapping
+  ✅ RoomSetupProgress   → completion score + blocking logic
 
 PHASE 2:
-  → RoomBlock          → Date-ranged OOO with auto-release
-  → RoomAmenityOverride → Room-specific amenity exceptions
-  → RoomTypeTranslation → Sinhala, Tamil, other languages
-  → display_name        → Luxury named rooms ("The Presidential Villa")
+  → RoomBlock            → Date-ranged OOO with auto-release
+  → RoomAmenityOverride  → Room-specific amenity exceptions
+  → RoomBedOverride      → Room-specific bed arrangement exceptions
+  → RoomTypeTranslation  → Sinhala, Tamil, other languages
+  → display_name         → Luxury named rooms ("The Presidential Villa")
   → Visual floor plan builder (drag-drop)
   → Bulk room generation wizard
 
