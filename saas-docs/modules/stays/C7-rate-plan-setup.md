@@ -668,7 +668,7 @@ no-show as a distinct configurable charge).
 
 ---
 
-### Entity 8b: `NoShowPolicy` — Reusable No-Show Rules
+### Entity 9: `NoShowPolicy` — Reusable No-Show Rules
 
 **Single source of truth for all no-show rules.** Created once → reused across many rate plans.
 A no-show is when the guest fails to arrive without cancelling — a different event from cancellation,
@@ -752,14 +752,25 @@ REPORTING CLARITY:
 
 ---
 
-### Entity 9: `RatePlanPolicy` — Operational Rules
+### Entity 10: `RatePlanPolicy` — Operational Rules
 
 Check-in/out times, child policy, pet policy for this specific rate plan.
+Also links the two reusable policies (cancellation + no-show) into this rate plan.
 Overrides hotel-level defaults where needed.
 
 ```
 id
 rate_plan_id          FK → RatePlan (1:1)
+
+cancellation_policy_id  FK → CancellationPolicy nullable.
+                        null = inherit hotel default cancellation policy.
+                        This is the only place cancellation is wired in.
+                        See Entity 8 for reusable cancellation policy.
+
+no_show_policy_id     FK → NoShowPolicy nullable.
+                        null = inherit hotel default no-show policy.
+                        This is the only place no-show is wired in.
+                        See Entity 8b for reusable no-show policy.
 
 check_in_from         time nullable. null = inherit hotel default.
 check_out_until       time nullable. null = inherit hotel default.
@@ -797,7 +808,7 @@ If any level says no → pet not permitted.
 
 ---
 
-### Entity 10: `RatePlanPayment` — Payment Collection Config
+### Entity 11: `RatePlanPayment` — Payment Collection Config
 
 How and when payment is collected for bookings under this rate plan.
 
@@ -829,7 +840,7 @@ refund_policy_days    int nullable. Days within which refund is processed.
 
 ---
 
-### Entity 11: `RatePlanChannel` — Channel Distribution
+### Entity 12: `RatePlanChannel` — Channel Distribution
 
 Controls which channels (OTAs, direct) sell this rate plan.
 Each row = one rate plan × one channel combination.
@@ -864,7 +875,7 @@ is_active             bool. Enable/disable this channel without deleting the rec
 
 ---
 
-### Entity 12: `RateParity` — Price Consistency Monitoring
+### Entity 13: `RateParity` — Price Consistency Monitoring
 
 Monitors that this rate plan's price doesn't appear cheaper on OTAs than on the hotel's
 direct channel. Protects direct booking margin.
@@ -934,7 +945,7 @@ last_violation_detected_at   = current timestamp  // only when a violation occur
 One important dependency: you need a mapping between your internal RatePlan / RoomType and each OTA’s rate and room identifiers. Without that mapping, the system cannot reliably compare the correct products.
 ---
 
-### Entity 13: `DerivedRatePlan` — Auto-Cascade Pricing
+### Entity 14: `DerivedRatePlan` — Auto-Cascade Pricing
 
 Defines how one rate plan is automatically calculated from another.
 The child rate plan's prices update automatically when the parent changes.
@@ -988,7 +999,7 @@ Prevention: Before every DerivedRatePlan save, application checks:
 
 ---
 
-### Entity 14: `PackageInclusion` — Bundled Services
+### Entity 15: `PackageInclusion` — Bundled Services
 
 Defines what is included in a package rate plan beyond just the room.
 Controls how inclusions appear on folio, trigger housekeeping tasks,
@@ -1056,7 +1067,7 @@ Setup once → auto-splits forever.
 
 ---
 
-### Entity 15: `RatePlanAuditLog` — Full Change History
+### Entity 16: `RatePlanAuditLog` — Full Change History
 
 Every change to every rate plan is recorded. Who changed what, when, and why.
 Also shows how many future bookings are affected before confirming the change.
@@ -1106,7 +1117,7 @@ SCENARIO 3: OTA dispute
 
 ---
 
-### Entity 16: `Channel` — Distribution Channel Master Table
+### Entity 17: `Channel` — Distribution Channel Master Table
 
 Master table of all distribution channels. Replaces hardcoded enum in `RatePlanChannel`.
 Adding a new OTA = insert one row. Zero code change. Zero deployment.
@@ -1176,7 +1187,8 @@ RatePlan (1)
   ├── PackageInclusion (many)          bundled services + revenue split (+ PER_COUPLE)
   │
   ├── RatePlanPolicy (1)               operational rules
-  │     └── CancellationPolicy ─────→ reusable + hybrid + no_show_charge (single source)
+  |     ── CancellationPolicy ──→ reusable cancel rules (cancellation only)
+  │     └── NoShowPolicy ────────→ reusable no-show rules (no-show only)
   │
   ├── RatePlanPayment (1)              collection method
   ├── RatePlanChannel (many)           channel_id FK → Channel (Entity 15, not enum)
@@ -1207,6 +1219,8 @@ on the Booking record. This snapshot is **never mutated** after creation.
   "cancellation_type": "FREE_UNTIL",
   "free_until_hours": 24,
   "no_show_charge": "FIRST_NIGHT",
+  "no_show_cut_off_time": "18:00",
+  "no_show_grace_period_minutes": 120,
   "deposit_percentage": 20,
   "currency_code": "LKR",
   "tax_profile_id": 3,
@@ -1357,11 +1371,11 @@ Packages        0             1            3            6+
 Derived Plans   0             1-2          4            8
 Audit log       auto          auto         auto         auto
 
-Entities used:  All 15        All 15       All 15       All 15
+Entities used:  All 17        All 17       All 17      All 17
 Fields used:    25%           55%          75%          100%
 ```
 
-Same 15 entities. Every hotel size. No schema changes between phases.
+Same 17 entities. Every hotel size. No schema changes between phases.
 
 ---
 
@@ -1395,7 +1409,8 @@ Same 15 entities. Every hotel size. No schema changes between phases.
 | RatePlan | name, code, template, meal_plan, pricing_model (PER_ROOM / PER_ADULT), visibility, status, is_active, currency_code |
 | RatePlanRoom | base_rate per room type (+ is_derived field even if derivation UI is Phase 2) |
 | RatePlanDateOverride | seasonal + holiday overrides + CTA/CTD fields |
-| CancellationPolicy | FREE_UNTIL / NON_REFUNDABLE / PARTIAL + date_change + no_show_charge |
+| CancellationPolicy | FREE_UNTIL / NON_REFUNDABLE / PARTIAL + date_change |
+| NoShowPolicy       | charge_type + cut_off_time + grace_period + auto_mark |
 | RatePlanPolicy | check-in/out, child policy, pet policy |
 | RatePlanPayment | all 4 collection types, deposit config |
 | RatePlanChannel | Direct + 2 OTA channels + channel_rate_plan_code |
@@ -1498,7 +1513,8 @@ STAFF & ROLES
 | 4 | RatePlanDayRule | 5-10 | Weekday multipliers (Phase 2) |
 | 5 | RatePlanLOSRule | 5-15 | Min/max stay + CTA/CTD (Phase 2) |
 | 6 | OccupancyPricing | 20 (5×4) | Extra guest charges (Phase 2) |
-| 7 | CancellationPolicy | 3-5 reusable | Cancel rules + no_show (single source) |
+| 7 | CancellationPolicy | 3-5 reusable | Cancel rules (cancellation only) |
+| 7b | NoShowPolicy | 2-3 reusable | No-show rules (separate from cancel) |
 | 8 | RatePlanPolicy | 5 | Check-in/out + child + pet policy |
 | 9 | RatePlanPayment | 5 | Payment collection config |
 | 10 | RatePlanChannel | 15-25 | Channel distribution via FK (not enum) |
