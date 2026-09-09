@@ -68,7 +68,6 @@ CREATE TABLE businesses (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     business_code       VARCHAR(30) NOT NULL UNIQUE,
     owner_id            UUID NOT NULL REFERENCES users(id),
-    parent_business_id  UUID REFERENCES businesses(id),
 
     legal_name          VARCHAR(200) NOT NULL,
     trading_name        VARCHAR(200) NOT NULL,
@@ -191,6 +190,82 @@ This allows old bookmarks, QR codes and URLs to redirect.
 
 ---
 
+## 3.3 `branches`
+
+> **Decided (supersedes §34 "Branch / Location Direction" below):** a branch is a **location under one tenant** (Option B), not a separate business. `parent_business_id` is removed from `businesses` — it is replaced by this table.
+
+```sql
+CREATE TABLE branches (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id       UUID NOT NULL REFERENCES businesses(id),
+
+    branch_code       VARCHAR(30) NOT NULL,
+    name              VARCHAR(200) NOT NULL,
+
+    is_headquarters   BOOLEAN NOT NULL DEFAULT FALSE,
+    timezone          VARCHAR(50),   -- NULL = inherit businesses.timezone
+
+    status            VARCHAR(20) NOT NULL DEFAULT 'active',
+
+    version           BIGINT NOT NULL DEFAULT 1,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_branch_code
+        UNIQUE (business_id, branch_code),
+
+    CONSTRAINT chk_branch_status
+        CHECK (status IN ('active','suspended','closed'))
+);
+
+CREATE INDEX idx_branches_business_id
+    ON branches(business_id);
+
+CREATE UNIQUE INDEX uq_business_single_headquarters
+    ON branches(business_id)
+    WHERE is_headquarters = TRUE;
+```
+
+### Purpose
+
+`branches` answers:
+
+> **Where does this business operate, and which one am I logged into right now?**
+
+It does not answer who can access a given branch — that is a Membership concern (`staff_branch_access`, see the Membership module).
+
+### Rules
+
+```text
+Every business has at least one branch — the headquarters (HQ) —
+created automatically when the business is created (see §27).
+
+Exactly one branch per business may have is_headquarters = TRUE
+(enforced by the partial unique index).
+
+A branch cannot be deleted — only disabled (status = 'closed'),
+same lifecycle discipline as businesses. Domain data created under
+a branch is never deleted when the branch is closed.
+```
+
+### Relationship to `business_addresses` and `business_hours`
+
+Each branch is a physical location, so it needs its own address and — often — its own hours:
+
+```text
+business_addresses.branch_id  (nullable)
+    NULL      → business's default/legal address
+    NOT NULL  → that specific branch's address
+
+business_hours.branch_id  (nullable)
+    NULL      → applies business-wide (fallback)
+    NOT NULL  → overrides for that specific branch
+```
+
+See §5 and §11 for the updated column definitions.
+
+---
+
 # 4. Business Profile
 
 ## `business_profiles`
@@ -231,7 +306,8 @@ email
 ```sql
 CREATE TABLE business_addresses (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_id   UUID NOT NULL UNIQUE REFERENCES businesses(id),
+    business_id   UUID NOT NULL REFERENCES businesses(id),
+    branch_id     UUID REFERENCES branches(id),   -- NULL = business default/legal address
     address_line1 VARCHAR(255),
     address_line2 VARCHAR(255),
     city          VARCHAR(100),
@@ -241,11 +317,19 @@ CREATE TABLE business_addresses (
     longitude     DECIMAL(10,7),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE UNIQUE INDEX uq_business_default_address
+    ON business_addresses(business_id)
+    WHERE branch_id IS NULL;
+
+CREATE UNIQUE INDEX uq_branch_address
+    ON business_addresses(branch_id)
+    WHERE branch_id IS NOT NULL;
 ```
 
-V1 supports one primary business address.
+V1 supports one address per branch, plus one business-level default (`branch_id IS NULL`) used when a branch has not set its own address.
 
-For Phase 2, do not automatically treat `parent_business_id` as the final branch design. A dedicated Business → Locations/Branches model may be cleaner.
+Branches are a V1 concept — see §3.3.
 
 ---
 
@@ -543,16 +627,23 @@ Therefore use a parent schedule + interval table.
 CREATE TABLE business_hours (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     business_id   UUID NOT NULL REFERENCES businesses(id),
+    branch_id     UUID REFERENCES branches(id),   -- NULL = business-wide fallback
     day_of_week   SMALLINT NOT NULL,
     is_open       BOOLEAN NOT NULL DEFAULT TRUE,
 
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    UNIQUE (business_id, day_of_week),
-
     CHECK (day_of_week BETWEEN 0 AND 6)
 );
+
+CREATE UNIQUE INDEX uq_business_default_hours
+    ON business_hours(business_id, day_of_week)
+    WHERE branch_id IS NULL;
+
+CREATE UNIQUE INDEX uq_branch_hours
+    ON business_hours(branch_id, day_of_week)
+    WHERE branch_id IS NOT NULL;
 ```
 
 ## `business_hour_intervals`
@@ -1141,6 +1232,9 @@ BusinessSuspendedEvent
 BusinessReactivatedEvent
 BusinessSlugChangedEvent
 BusinessTaxRateChangedEvent
+BranchCreatedEvent
+BranchUpdatedEvent
+BranchDeactivatedEvent
 ```
 
 Example:
@@ -1162,7 +1256,21 @@ public record BusinessOperationDisabledEvent(
     Guid BusinessId,
     string OperationType
 ) : IDomainEvent;
+
+public record BranchCreatedEvent(
+    Guid BusinessId,
+    Guid BranchId,
+    string BranchCode,
+    bool IsHeadquarters
+) : IDomainEvent;
+
+public record BranchDeactivatedEvent(
+    Guid BusinessId,
+    Guid BranchId
+) : IDomainEvent;
 ```
+
+`BranchCreatedEvent` is consumed by the Membership module: the business owner's membership gets implicit access to every branch (bypass), and — per product policy — existing non-owner staff are **not** auto-granted the new branch; access must be explicitly assigned (mirrors how new operations are not auto-granted to existing custom-permission staff).
 
 ---
 
@@ -1183,16 +1291,22 @@ Create business_settings
         ↓
 Create default business hours
         ↓
-Create Outbox BusinessCreatedEvent
+Create headquarters branch (is_headquarters = TRUE)
+        ↓
+Create Outbox BusinessCreatedEvent + BranchCreatedEvent
         ↓
 COMMIT
         ↓
-Outbox publishes event
+Outbox publishes events
         ↓
 Membership creates owner membership
+        ↓
+Membership grants owner implicit access to all branches (bypass — see Membership module)
 ```
 
 No operation needs to be automatically enabled unless product policy explicitly requires it.
+
+Every business is created with exactly one branch (the HQ). Additional branches are created explicitly via `POST /api/businesses/{id}/branches` (§36).
 
 ---
 
@@ -1246,6 +1360,31 @@ Historical data remains
 
 ---
 
+# 29a. Creating a Branch
+
+```text
+Authorize business.branch.manage
+        ↓
+Business not closed?
+        ↓
+Validate branch_code uniqueness within business
+        ↓
+Create branches row (is_headquarters = FALSE)
+        ↓
+Create Outbox BranchCreatedEvent
+        ↓
+COMMIT
+        ↓
+Publish BranchCreatedEvent
+        ↓
+Membership: owner gains bypass access automatically;
+            other staff need explicit staff_branch_access grants
+```
+
+The headquarters branch cannot be deleted or have `is_headquarters` reassigned through this flow — HQ transfer (if ever needed) is a deliberate, separate admin action, not part of V1.
+
+---
+
 # 30. Authorization
 
 Do not use:
@@ -1283,9 +1422,13 @@ business.profile.update
 business.settings.update
 business.operation.manage
 business.addon.manage
+business.branch.view
+business.branch.manage
 ```
 
 This aligns Business with the dynamic RBAC design.
+
+Note: `business.branch.manage` authorizes *creating/editing/closing* a branch (a Business-module concern). It is distinct from `staff_branch_access` (a Membership-module concern), which authorizes *which staff can see/operate a given branch's data*. Creating a branch does not, by itself, grant anyone access to it beyond the owner bypass.
 
 ---
 
@@ -1317,6 +1460,14 @@ public interface IBusinessService
         GetOperationTaxRates(
             Guid businessId,
             OperationType operationType);
+
+    Task<IReadOnlyList<BranchDto>> GetBranches(Guid businessId);
+
+    Task<BranchDto> GetBranch(Guid branchId);
+
+    Task<bool> IsBranchActive(Guid branchId);
+
+    Task<Guid> GetHeadquartersBranch(Guid businessId);
 }
 ```
 
@@ -1328,9 +1479,10 @@ They do not query:
 businesses
 business_operations
 business_tax_rates
+branches
 ```
 
-directly.
+directly. In particular, Membership's `staff_branch_access` stores only `branch_id` references and calls `IBusinessService.IsBranchActive` / `GetBranches` rather than joining into Business tables.
 
 ---
 
@@ -1340,12 +1492,15 @@ directly.
 users
   │
   └── businesses
+        ├── branches                           (1:many — exactly 1 is_headquarters)
         ├── business_profiles                  (1:1)
-        ├── business_addresses                 (1:1 in V1)
+        ├── business_addresses                 (1:many — 1 default + 1 per branch)
+        │      └── branches (optional FK)
         ├── business_images                    (1:many)
         ├── business_slug_history              (1:many)
-        ├── business_hours                     (1:7)
-        │      └── business_hour_intervals     (1:many)
+        ├── business_hours                     (1:7 default + 1:7 per branch)
+        │      ├── business_hour_intervals     (1:many)
+        │      └── branches (optional FK)
         ├── business_hour_exceptions           (1:many)
         ├── business_settings                  (1:1)
         ├── business_tax_profiles              (1:1)
@@ -1356,6 +1511,8 @@ users
                          │
                          └── business_tax_rates
 ```
+
+Branch-level staff scoping (`staff_branch_access`) lives in the Membership module, not here — see Membership module → Branch Access Control.
 
 ---
 
@@ -1374,6 +1531,10 @@ Business reactivated
 
 Operation enabled
 Operation disabled
+
+Branch created
+Branch updated
+Branch closed
 
 Add-on enabled
 Add-on disabled
@@ -1395,41 +1556,30 @@ A centralized OneNex audit module is preferable if one already exists.
 
 ---
 
-# 34. Branch / Location Direction
+# 34. Branch / Location Direction — DECIDED (V1)
 
-`parent_business_id` can remain nullable as a future placeholder.
+> Superseded: this used to defer the decision to Phase 2. It is now decided and built in V1 — see §3.3 `branches`.
 
-However, V1 should not build branch behavior around it.
-
-Before Phase 2, decide whether a branch is:
-
-### Option A — Separate tenant
-
-```text
-Business A
-Business B
-```
-
-Each has separate membership/isolation.
-
-### Option B — Location under one tenant
+**Option B — Location under one tenant** was chosen:
 
 ```text
 Business
- ├── Colombo Location
- ├── Kandy Location
- └── Galle Location
+ ├── Jaffna Branch (HQ)
+ ├── Colombo Branch
+ └── Kandy Branch
 ```
 
-The second model may be cleaner for multi-location operators because it allows:
+`parent_business_id` has been removed from `businesses`. Branches are modeled as their own entity (`branches`, §3.3), owned by exactly one business, never as a second row in `businesses`.
 
-- Shared ownership
-- Consolidated reporting
-- Location-specific inventory
-- Location-specific POS
-- Location-specific staff scope
-- Location-specific hours
-- Location-specific addresses
+This model was chosen (over Option A — separate tenant per location) because it gives multi-location operators, in one login:
+
+- Shared ownership and single staff identity across locations
+- Consolidated reporting at the business level
+- Location-specific staff scope (Membership module's `staff_branch_access`)
+- Location-specific hours (`business_hours.branch_id`)
+- Location-specific addresses (`business_addresses.branch_id`)
+
+A single business-scoped login (`onenex.ai/{business-slug}`) never exposes another business's data — but it does span all of that business's branches, filtered by which branches the logged-in staff member has access to (§ Membership module: Branch Access Control). There is no "switch business" control inside a business portal; switching businesses means returning to the Owner Portal / login and re-selecting (see the Identity module's Business Context & Portal Access flow).
 
 ---
 
@@ -1438,9 +1588,10 @@ The second model may be cleaner for multi-location operators because it allows:
 | Table | Purpose | Status |
 |---|---|---|
 | `businesses` | Tenant/business identity | Build |
+| `branches` | Business locations (HQ + additional branches) | Build |
 | `business_slug_history` | Old slug history/redirect | Build |
 | `business_profiles` | Profile/contact | Build |
-| `business_addresses` | Primary physical address | Build |
+| `business_addresses` | Business default + per-branch address | Build |
 | `business_images` | Logo/cover/gallery | Build |
 | `business_operations` | Enabled operations — single source of truth | Build |
 | `business_operation_addons` | Add-ons per operation | Build |
@@ -1466,13 +1617,17 @@ Authorization is permission-based.
 | GET | `/api/businesses` | `business.view` |
 | GET | `/api/businesses/{id}` | `business.view` + membership |
 | PUT | `/api/businesses/{id}` | `business.update` |
-| GET | `/api/businesses/resolve/{slug}` | Public tenant resolution |
+| GET | `/api/businesses/resolve/{slug}` | Public tenant resolution — returns `businessId` + branch list for the Owner Portal's business/branch picker |
 | GET/PUT | `/api/businesses/{id}/profile` | `business.profile.view/update` |
-| GET/PUT | `/api/businesses/{id}/address` | `business.address.view/update` |
+| GET/PUT | `/api/businesses/{id}/address` | `business.address.view/update` — `?branchId=` optional |
 | GET/POST/PUT/DELETE | `/api/businesses/{id}/images` | `business.images.manage` |
 | GET/POST/DELETE | `/api/businesses/{id}/operations` | `business.operation.view/manage` |
 | POST/DELETE | `/api/businesses/{id}/operations/{type}/addons` | `business.addon.manage` |
-| GET/PUT | `/api/businesses/{id}/hours` | `business.hours.view/manage` |
+| GET | `/api/businesses/{id}/branches` | `business.branch.view` + membership |
+| POST | `/api/businesses/{id}/branches` | `business.branch.manage` |
+| GET/PUT | `/api/businesses/{id}/branches/{branchId}` | `business.branch.view/manage` |
+| DELETE | `/api/businesses/{id}/branches/{branchId}` | `business.branch.manage` — soft-close only, HQ blocked |
+| GET/PUT | `/api/businesses/{id}/hours` | `business.hours.view/manage` — `?branchId=` optional |
 | GET/POST/PUT/DELETE | `/api/businesses/{id}/hours/exceptions` | `business.hours.manage` |
 | GET/PUT | `/api/businesses/{id}/settings` | `business.settings.view/update` |
 | GET/POST/PUT/DELETE | `/api/businesses/{id}/tax-rates` | `business.tax.view/manage` |
@@ -1487,6 +1642,7 @@ Modules/Business/
 ├── Domain/
 │   ├── Entities/
 │   │   ├── Business.cs
+│   │   ├── Branch.cs
 │   │   ├── BusinessProfile.cs
 │   │   ├── BusinessAddress.cs
 │   │   ├── BusinessImage.cs
@@ -1504,7 +1660,9 @@ Modules/Business/
 │   │   ├── BusinessCreatedEvent.cs
 │   │   ├── BusinessOperationEnabledEvent.cs
 │   │   ├── BusinessOperationDisabledEvent.cs
-│   │   └── BusinessSuspendedEvent.cs
+│   │   ├── BusinessSuspendedEvent.cs
+│   │   ├── BranchCreatedEvent.cs
+│   │   └── BranchDeactivatedEvent.cs
 │   └── ValueObjects/
 │       ├── BusinessSlug.cs
 │       ├── OperationType.cs
@@ -1513,6 +1671,7 @@ Modules/Business/
 ├── Application/
 │   └── Features/
 │       ├── Businesses/
+│       ├── Branches/
 │       ├── Profile/
 │       ├── Address/
 │       ├── Images/
@@ -1556,8 +1715,8 @@ TAX CONFIGURATION
 TRANSACTION SNAPSHOT
 = What exact tax/configuration was used when the transaction happened?
 
-LOCATION / BRANCH (future)
-= Where does this business operate?
+BRANCH
+= Where does this business operate — which location is this portal session scoped to?
 ```
 
 This separation allows the business identity to remain stable while operations, subscriptions, permissions, tax rules and domain capabilities evolve independently.
@@ -1580,10 +1739,14 @@ The resulting OneNex Business architecture is:
                          │ Settings            │
                          └──────────┬──────────┘
                                     │
-                   ┌────────────────┼────────────────┐
-                   │                │                │
-                   ▼                ▼                ▼
-          business_operations   Tax Config       Business Hours
+                   ┌────────────────┼────────────────┬────────────────┐
+                   │                │                │                │
+                   ▼                ▼                ▼                ▼
+          business_operations   Tax Config       Business Hours     Branches
+                   │                                                   │
+                                                            ┌──────────┴──────────┐
+                                                            ▼                     ▼
+                                                     Branch Address        Branch Hours
                    │
           ┌────────┼─────────┐
           ▼        ▼         ▼

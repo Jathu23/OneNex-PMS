@@ -105,12 +105,13 @@ Domain Rules
 
 # 2. Core Concepts
 
-## 2.1 Four Questions OneNex Must Answer
+## 2.1 Five Questions OneNex Must Answer
 
 1. Who is this person?
 2. Which business are they operating in?
-3. What permissions do they effectively have in that business?
-4. Is this particular operation/resource action allowed?
+3. Which branch (location) of that business are they operating in?
+4. What permissions do they effectively have in that business/branch?
+5. Is this particular operation/resource action allowed?
 
 ---
 
@@ -120,9 +121,12 @@ Domain Rules
 |---|---|---|
 | **Business role** | `owner`, `admin`, `member` | Staff management, business settings, role management, subscription administration |
 | **Operation role** | Dining: `manager`; Stays: `viewer` | Actions inside a specific operation |
+| **Branch access** | Jaffna ✓, Colombo ✓, Kandy ✗ | Which physical location's data the staff member can see or act on |
 | **Permission** | `dining:orders:void` | One concrete capability |
 | **Override** | `ALLOW / DENY` one permission | One employee's exception to normal role permissions |
 | **Domain rule** | Order is OPEN and belongs to Business A | Whether the requested business action is valid after authorization |
+
+Branch access is a **separate, independent dimension** from business role and operation role — exactly like operation access, but scoped to *where* rather than *what*. `business_role = owner` bypasses branch checks entirely (owner sees every branch). `admin` and `member` see only the branches explicitly granted via `staff_branch_access`, regardless of their operation roles.
 
 ### Example
 
@@ -135,6 +139,11 @@ Business:
 Business Role:
     member
 
+Branch Access:
+    Jaffna Branch (HQ)  → granted
+    Colombo Branch      → granted
+    Kandy Branch        → not granted
+
 Operation Access:
     Dining       → manager
     Stays        → viewer
@@ -144,6 +153,8 @@ Operation Access:
 Override:
     dining:orders:refund → ALLOW
 ```
+
+Abi can manage Dining orders — but only for the Jaffna and Colombo branches. A `dining:orders:void` request for a Kandy order is rejected at the branch-access check, before the operation-role/permission check even runs.
 
 Effective permissions are the union of the applicable operation-role permissions, then modified by explicit `DENY / ALLOW` overrides.
 
@@ -163,6 +174,7 @@ Existing `Users`, `Businesses`, `Branches` and operation tables are assumed to b
 | `roles` | System and business custom roles | Required |
 | `role_permissions` | Role ↔ permission mapping | Required |
 | `staff_operation_access` | Membership ↔ operation role | Required |
+| `staff_branch_access` | Membership ↔ branch grant (which locations a staff member can operate in) | Required |
 | `staff_custom_permissions` | Per-staff ALLOW/DENY overrides | Required |
 | `authorization_states` | Authorization version per membership | Required |
 | `authorization_audits` | Security audit history | Required |
@@ -350,6 +362,58 @@ Keeping `access_status` separate from `role_id` is preferable to representing no
 
 ---
 
+## 4.6a `staff_branch_access`
+
+Grants a staff member access to a specific branch (location) of the business. Owner bypasses this check entirely (implicit access to every branch). Admin and member must have an explicit row per branch — access is **not** derived from `business_role` or from any operation role.
+
+| **Field** | **Type** | **Null** | **Key / Rule** | **Description** |
+|---|---|---|---|---|
+| `id` | uuid | NO | PK | Access row ID |
+| `staff_membership_id` | uuid | NO | FK `staff_memberships.id` | Membership |
+| `branch_id` | uuid | NO | FK `branches.id` (Business module) | Granted branch |
+| `granted_by_user_id` | uuid | NO | FK `users.id` | Who granted this branch |
+| `granted_at` | timestamptz | NO | — | Grant timestamp |
+
+### Constraints
+
+```sql
+UNIQUE (staff_membership_id, branch_id)
+
+INDEX (staff_membership_id)
+```
+
+### Default Grant on Invite
+
+Same pattern as `staff_operation_access`: when a staff member is invited, the system auto-creates one `staff_branch_access` row per branch **currently active on the business at invite time**. The owner can then customize — revoke Kandy, keep Jaffna and Colombo — exactly as shown in the mockups.
+
+```text
+Owner invites Kamal as "Manager":
+  Jaffna Branch (HQ)  → auto-granted
+  Colombo Branch      → auto-granted
+  Kandy Branch        → auto-granted
+  [all branches active at invite time]
+
+Owner customizes: revokes Kamal's Kandy Branch access.
+```
+
+### New Branch Created After Staff Onboarded
+
+A new branch is **not** retroactively granted to existing non-owner staff (`BranchCreatedEvent` triggers no automatic `staff_branch_access` inserts for admin/member — only the owner's bypass covers it automatically). An explicit grant is required. This mirrors the open question already on file for new operations (§ "New operation enabled after staff already onboarded").
+
+### Important Rule
+
+```text
+No staff_branch_access row for (membership, branch)
+    AND
+business_role != owner
+    ↓
+403 on any request scoped to that branch
+    ↓
+Regardless of operation role or permission overrides
+```
+
+---
+
 ## 4.7 `staff_custom_permissions`
 
 | **Field** | **Type** | **Null** | **Key / Rule** | **Description** |
@@ -445,12 +509,15 @@ The outbox is the safer path when reliable event delivery becomes necessary.
 
 # 5. Sample Data
 
-## 5.1 Businesses and Users
+## 5.1 Businesses, Branches and Users
 
 | **ID** | **Name / Email** | **Type** |
 |---|---|---|
 | B001 | Grand Hotel | Business |
 | B002 | City Apartments | Business |
+| BR001 | Jaffna Branch (HQ) | Branch of B001 |
+| BR002 | Colombo Branch | Branch of B001 |
+| BR003 | Kandy Branch | Branch of B001 |
 | U001 | Abi | User |
 | U002 | Kamal | User |
 | U003 | John | User |
@@ -467,6 +534,22 @@ The outbox is the safer path when reliable event delivery becomes necessary.
 | M004 | Abi | City Apartments | admin | active |
 
 The same user can have different business roles because membership is scoped by business.
+
+---
+
+## 5.2a Branch Access
+
+| **Membership** | **Branch** | **Access** |
+|---|---|---|
+| M001 (Abi, member) | Jaffna Branch (HQ) | granted |
+| M001 (Abi, member) | Colombo Branch | granted |
+| M001 (Abi, member) | Kandy Branch | not granted |
+| M002 (Kamal, admin) | Jaffna Branch (HQ) | granted |
+| M002 (Kamal, admin) | Colombo Branch | granted |
+| M002 (Kamal, admin) | Kandy Branch | granted |
+| M003 (John, member) | Jaffna Branch (HQ) | granted |
+
+Owner (not shown — no `staff_branch_access` rows needed) always has access to all three branches via bypass.
 
 ---
 
@@ -562,12 +645,26 @@ GetEffectivePermissionsAsync(staffMembershipId)
 14. Cache result
 ```
 
+`GetEffectivePermissionsAsync` resolves *what* the member can do, business-wide — it does not know *which branch* is being requested. Branch access is checked separately, on the specific request, because it depends on the resource being touched, not on the membership alone. See `HasBranchAccessAsync` below and §7 for where this fits in the request flow.
+
+```text
+HasBranchAccessAsync(staffMembershipId, branchId)
+
+1. Load membership
+2. If owner → TRUE (bypass)
+3. staff_branch_access row exists for (staffMembershipId, branchId)?
+       → YES → TRUE
+       → NO  → FALSE
+```
+
 ## Final Precedence
 
 ```text
 Business owner bypass (if enabled)
         ↓
 Membership must be active
+        ↓
+Branch access must be granted (owner bypasses; skipped if request is not branch-scoped)
         ↓
 Operation access must be enabled
         ↓
@@ -602,6 +699,13 @@ Resolve current Business Context
 Load Staff Membership
     ├── missing → 403
     └── suspended/inactive → 401/403 according to API contract
+          ↓
+Request scoped to a branch?
+    ├── NO  → skip branch check
+    └── YES → HasBranchAccessAsync(membership, branchId)
+                  ├── owner → bypass
+                  ├── granted → continue
+                  └── not granted → 403
           ↓
 ASP.NET Core Authorization Policy
           ↓
@@ -697,6 +801,19 @@ protected override async Task HandleRequirementAsync(
         return;
     }
 
+    var branchId = context.User.GetBranchId(); // from route/resource, may be null
+
+    if (branchId is not null)
+    {
+        var hasBranchAccess =
+            await membershipService.HasBranchAccessAsync(
+                membership.Id,
+                branchId.Value);
+
+        if (!hasBranchAccess)
+            return; // 403 — branch not granted to this staff member
+    }
+
     var allowed =
         await authorizationService.HasPermissionAsync(
             membership.Id,
@@ -724,6 +841,25 @@ public interface IAuthorizationService
         CancellationToken cancellationToken = default);
 }
 ```
+
+`HasBranchAccessAsync` / `GetAccessibleBranchesAsync` (called by the handler as `membershipService.HasBranchAccessAsync(...)` above) live on the membership service contract, not here — branch grants are membership data, not permission data:
+
+```csharp
+public interface IMembershipService
+{
+    Task<StaffMembershipDto> GetActiveMembershipAsync(
+        Guid userId, Guid businessId);
+
+    Task<bool> HasBranchAccessAsync(
+        Guid staffMembershipId,
+        Guid branchId);
+
+    Task<IReadOnlyList<Guid>> GetAccessibleBranchesAsync(
+        Guid staffMembershipId);
+}
+```
+
+`GetAccessibleBranchesAsync` powers the branch picker/filter shown in the portal ("Jaffna Branch (HQ)" / "Colombo Branch" with green "Access Granted" badges) — the frontend never computes this itself.
 
 ---
 
@@ -762,6 +898,12 @@ Optional:
 
 ```text
 authz-version:{businessId}:{userId}
+```
+
+Branch access (separate cache, invalidated independently since it changes far less often than permissions):
+
+```text
+branch-access:{businessId}:{userId}   → ["branch_id_1", "branch_id_2", ...]
 ```
 
 Always include business context.
@@ -922,6 +1064,14 @@ modelBuilder.Entity<StaffOperationAccess>()
     })
     .IsUnique();
 
+modelBuilder.Entity<StaffBranchAccess>()
+    .HasIndex(x => new
+    {
+        x.StaffMembershipId,
+        x.BranchId
+    })
+    .IsUnique();
+
 modelBuilder.Entity<RolePermission>()
     .HasKey(x => new
     {
@@ -982,6 +1132,34 @@ CREATE INDEX ix_staff_memberships_business_status
     ON staff_memberships(business_id, status);
 ```
 
+## `staff_branch_access`
+
+```sql
+CREATE TABLE staff_branch_access (
+    id uuid PRIMARY KEY,
+
+    staff_membership_id uuid NOT NULL
+        REFERENCES staff_memberships(id)
+        ON DELETE CASCADE,
+
+    branch_id uuid NOT NULL
+        REFERENCES branches(id),
+
+    granted_by_user_id uuid NOT NULL
+        REFERENCES users(id),
+
+    granted_at timestamptz NOT NULL,
+
+    CONSTRAINT uq_staff_branch_access
+        UNIQUE(staff_membership_id, branch_id)
+);
+
+CREATE INDEX ix_staff_branch_access_membership
+    ON staff_branch_access(staff_membership_id);
+```
+
+`branches` is owned and defined by the Business module (see its `branches` table). Membership only stores the FK and never queries Business tables directly.
+
 ## `permissions`
 
 ```sql
@@ -1029,10 +1207,11 @@ The application must never rely on:
 - A subdomain
 - A route value
 - A frontend-selected business ID
+- A frontend-selected branch ID
 
 as the security decision.
 
-The server resolves the business context and verifies the authenticated user's membership.
+The server resolves the business context and verifies the authenticated user's membership. The same applies to branch context — a URL like `onenex.ai/rio-jaffna` *identifies* which business is being requested, but the URL alone never grants access; membership (and, if the resource is branch-scoped, `staff_branch_access`) must be verified server-side on every request.
 
 ## Example Request
 
@@ -1051,11 +1230,14 @@ grandhotel.onenex.com/api/dining/orders/123
 
 4. Verify status = active
 
-5. Authorize requested permission
+5. Order O123 belongs to Branch B_JAFFNA →
+   Verify staff_branch_access(M001, B_JAFFNA) OR owner bypass
 
-6. Query order with BusinessId = B001
+6. Authorize requested permission
 
-7. Execute domain rules
+7. Query order with BusinessId = B001 AND BranchId = B_JAFFNA
+
+8. Execute domain rules
 ```
 
 For PostgreSQL, Row-Level Security can provide a second database-level tenant isolation layer. PostgreSQL policies can restrict rows returned or modified and use `USING / WITH CHECK` expressions. 
@@ -1091,13 +1273,19 @@ GET /api/me/capabilities
     "dining:orders:create",
     "dining:orders:handle",
     "dining:orders:refund"
+  ],
+  "branches": [
+    { "branchId": "BR_JAFFNA", "name": "Jaffna Branch", "isHeadquarters": true },
+    { "branchId": "BR_COLOMBO", "name": "Colombo Branch", "isHeadquarters": false }
   ]
 }
 ```
 
+`branches` lists only the branches this membership can access (owner bypass returns every active branch on the business). The frontend uses this both to hide/show UI and to render the branch switcher/filter inside the business portal.
+
 The frontend uses this to hide/show UI.
 
-Every protected backend operation still performs authorization.
+Every protected backend operation still performs authorization — including the branch check, which is re-verified per request, not trusted from this cached response.
 
 ---
 
@@ -1109,8 +1297,10 @@ Every protected backend operation still performs authorization.
 | **Admin** | Admin does NOT automatically receive all operation permissions. Business administration permissions are separate. |
 | **Member** | Operation roles determine access. |
 | **Admin changing dining config** | Allowed only if business policy explicitly grants business admins configuration access; otherwise require dining config permission. |
+| **Branch access (owner)** | Bypasses `staff_branch_access` entirely — every current and future branch. |
+| **Branch access (admin/member)** | Must have an explicit `staff_branch_access` row for the requested branch. Not derived from `business_role` or any operation role. |
 | **Suspended member** | No normal business access; reject before permission evaluation. |
-| **Removed member** | Membership deleted/deactivated and cache invalidated immediately. |
+| **Removed member** | Membership deleted/deactivated and cache invalidated immediately (including branch-access cache). |
 
 ---
 
@@ -1139,7 +1329,7 @@ The seeded role-permission mappings are the actual authority.
 | **Maintenance** | `maintenance:tasks:view`, `maintenance:tasks:create`, `maintenance:tasks:assign`, `maintenance:tasks:complete`, `maintenance:reports:view` |
 | **CRM** | `crm:customers:view`, `crm:customers:create`, `crm:customers:update`, `crm:customers:delete`, `crm:loyalty:manage` |
 | **Payments** | `payments:transactions:view`, `payments:refund:create`, `payments:reconciliation:manage` |
-| **Business** | `business:staff:view`, `business:staff:invite`, `business:staff:remove`, `business:roles:manage`, `business:settings:manage` |
+| **Business** | `business:staff:view`, `business:staff:invite`, `business:staff:remove`, `business:roles:manage`, `business:settings:manage`, `business:branches:view`, `business:branches:manage` |
 
 ---
 
@@ -1182,17 +1372,20 @@ public sealed record HandleOrderCommand(Guid OrderId)
 ## Never
 
 - Never trust a frontend-supplied business ID without resolving and validating membership.
+- Never trust a frontend-supplied branch ID without resolving and validating `staff_branch_access` (or owner bypass).
 - Never use the frontend permission list as an authorization source.
 - Never put the complete dynamic permission set in the JWT.
 - Never query another module's RBAC tables directly.
 - Never use role-name string comparisons inside operation modules.
 - Never store raw invitation tokens or PINs.
+- Never assume operation-role access implies branch access, or vice versa — they are independent checks.
 
 ## Always
 
 - Always audit role and permission changes.
 - Always invalidate authorization cache after an authorization change.
 - Always include business context in authorization cache keys.
+- Always verify branch access before executing a query scoped to a specific branch's data.
 - Use parameterized queries / EF Core rather than dynamic SQL built from permission strings.
 - Do not let an inactive/suspended membership continue through the normal authorization path.
 - Keep domain/resource validation after permission authorization.
@@ -1243,25 +1436,28 @@ Implement the system in the following order:
 2. Create `roles` and `role_permissions`; seed the five operation roles and business administration permissions.
 3. Create `staff_memberships` and enforce `UNIQUE(user_id, business_id)`.
 4. Create `staff_operation_access` and implement operation enable/disable.
-5. Create `staff_custom_permissions` with ALLOW/DENY, expiration and reserved scope fields.
-6. Create `staff_invitations` and implement single-use hashed invitation tokens.
-7. Create `authorization_states` and increment its version on every authorization mutation.
-8. Create `authorization_audits` and write an audit record in the same transaction as the authorization change.
-9. Implement `EffectivePermissionResolver`.
-10. Implement L2 Redis permission cache.
-11. Implement L1 `IMemoryCache`.
-12. Implement cache invalidation after committed authorization changes.
-13. Implement ASP.NET Core dynamic permission policies and authorization handler.
-14. Add MediatR `AuthorizationBehavior`.
-15. Add `GET /api/me/capabilities` for frontend UX.
-16. Add tenant/business context middleware and active-membership validation.
-17. Add integration tests for cross-business access.
-18. Add observability:
+5. Create `staff_branch_access` and implement branch grant/revoke, including auto-grant-all-current-branches on invite.
+6. Create `staff_custom_permissions` with ALLOW/DENY, expiration and reserved scope fields.
+7. Create `staff_invitations` and implement single-use hashed invitation tokens.
+8. Create `authorization_states` and increment its version on every authorization mutation.
+9. Create `authorization_audits` and write an audit record in the same transaction as the authorization change.
+10. Implement `EffectivePermissionResolver`.
+11. Implement `HasBranchAccessAsync` / `GetAccessibleBranchesAsync`.
+12. Implement L2 Redis permission + branch-access cache.
+13. Implement L1 `IMemoryCache`.
+14. Implement cache invalidation after committed authorization/branch-access changes.
+15. Implement ASP.NET Core dynamic permission policies and authorization handler, including the branch-access check.
+16. Add MediatR `AuthorizationBehavior`.
+17. Add `GET /api/me/capabilities` for frontend UX (including accessible branches).
+18. Add tenant/business context middleware and active-membership validation.
+19. Add integration tests for cross-business and cross-branch access.
+20. Add observability:
     - Authorization cache hit/miss
     - Denied requests
     - Invalidation events
     - Resolver latency
-19. Only after the application flow is stable, evaluate PostgreSQL RLS for defense in depth.
+    - Branch-access denials
+21. Only after the application flow is stable, evaluate PostgreSQL RLS for defense in depth.
 
 ---
 
@@ -1281,6 +1477,12 @@ Implement the system in the following order:
 | Role permission changes | Authorization version increments and cache invalidates |
 | Two businesses, same user, different permissions | Cache and authorization remain isolated |
 | Cross-business order ID supplied | Domain/tenant query rejects access |
+| Owner has no staff_branch_access rows | Still allowed on every branch (bypass) |
+| Admin/member has no staff_branch_access row for requested branch | 403, even with full operation-role permissions |
+| Admin/member has staff_branch_access for Branch A only, requests Branch B resource | 403 for B, allowed for A |
+| New branch created after staff onboarded | Existing non-owner staff have no access until explicitly granted |
+| Staff invited while 3 branches active | 3 staff_branch_access rows auto-created |
+| Owner revokes one staff_branch_access row | That branch immediately inaccessible to that staff member; others unaffected |
 | Redis unavailable | Defined fail-safe strategy; no unauthorized fallback |
 | Invalid JWT | 401 |
 | Authenticated but unauthorized | 403 |
@@ -1297,6 +1499,9 @@ Implement the system in the following order:
 | **Business role** | Fixed enum `owner/admin/member` |
 | **Operation role** | Per operation through `staff_operation_access` |
 | **No operation access** | `access_status = disabled`; do not create a fake `none` role |
+| **Branch model** | Branch = location under one tenant (Business module `branches`), not a separate business |
+| **Branch access** | Explicit per-branch grant via `staff_branch_access`; owner bypasses; independent of business role and operation role |
+| **Branch access default** | Auto-granted for every branch active at invite time; new branches require explicit grant |
 | **Override effect** | Constrained string CHECK `ALLOW/DENY` |
 | **Override expiry** | Supported now |
 | **Scope** | Columns reserved now; scope enforcement introduced when product requires it |
@@ -1323,6 +1528,8 @@ grandhotel.onenex.com
 
 ### JWT
 
+This is the **business-scoped session token** (JWT_2), minted by Identity after Abi selected Grand Hotel in the Owner Portal — see the Identity module's "Business Context & Portal Access" flow. The original login token (JWT_1) never carries a business_id.
+
 ```text
 sub = U001
 business_id = B001
@@ -1333,6 +1540,8 @@ business_id = B001
 ```http
 POST /api/dining/orders/O123/handle
 ```
+
+Order O123 belongs to Branch `BR_JAFFNA` (resolved by the Dining module from the order record, not from the request).
 
 ### Authorization Flow
 
@@ -1347,36 +1556,45 @@ POST /api/dining/orders/O123/handle
    → M001
    → active
 
-4. Required permission
+4. Load Order O123 → belongs to Branch BR_JAFFNA
+
+5. Branch access check
+   → HasBranchAccessAsync(M001, BR_JAFFNA)
+   → owner? no → check staff_branch_access
+   → granted → PASS
+
+6. Required permission
    → dining:orders:handle
 
-5. L1 cache
+7. L1 cache
    → MISS
 
-6. Redis
+8. Redis
    → HIT
 
-7. Effective permissions contain
+9. Effective permissions contain
    dining:orders:handle
    → PASS
 
-8. MediatR HandleOrderCommand
-   → PASS
+10. MediatR HandleOrderCommand
+    → PASS
 
-9. Load Order O123
-   WHERE business_id = B001
+11. Load Order O123
+    WHERE business_id = B001
 
-10. Domain rule
+12. Domain rule
     → order exists
     → belongs to B001
     → state is handleable
 
-11. Transaction
+13. Transaction
     → COMMIT
 
-12. Response
+14. Response
     → 200 / 204
 ```
+
+If Abi instead lacked `staff_branch_access` for `BR_JAFFNA` (e.g., only granted Colombo), the request stops at step 5 and returns `403 Forbidden` — before the permission check even runs.
 
 If John has only Dining staff permissions and lacks:
 
@@ -1402,6 +1620,7 @@ The operation handler should not contain special-case code for John.
 - Do not assume hidden UI means security.
 - Handle a backend `403` gracefully because permissions may have changed since the capabilities call.
 - Refresh capabilities after a business switch or authorization version change.
+- There is no in-portal business switcher by design — switching businesses means returning to the Owner Portal / login screen and re-selecting (see Identity module). A branch filter/switcher *within* the current business portal is fine, but every branch-scoped request is still re-checked server-side regardless of what the UI shows as "selected."
 
 ---
 
@@ -1452,6 +1671,7 @@ EF Core documentation confirms relational relationships are represented through 
 - [ ] All protected endpoints have a permission policy.
 - [ ] MediatR behavior protects command entry points where appropriate.
 - [ ] Cross-business integration tests pass.
+- [ ] Cross-branch integration tests pass (non-owner staff cannot see/act on an ungranted branch).
 - [ ] Suspended/removed users are rejected immediately.
 - [ ] Frontend capability endpoint is implemented.
 - [ ] Metrics and security logs are available.
@@ -1474,41 +1694,46 @@ EF Core documentation confirms relational relationships are represented through 
 │       Business       │
 └──────────┬───────────┘
            │
-     ┌─────┴─────┐
-     ▼           ▼
-Business Role   Operation Access
-owner/admin/    Dining/Stays/etc.
-member
-     │           │
-     │           ▼
-     │         Role
-     │           │
-     │           ▼
-     │     Role Permissions
-     │           │
-     │           ▼
-     │     Staff Overrides
-     │           │
-     └─────┬─────┘
-           ▼
-Effective Permission Set
-           │
-     ┌─────┴─────┐
-     ▼           ▼
- L1 Memory     Redis
-     │           │
-     └─────┬─────┘
-           ▼
-Authorization Policy
-           │
-           ▼
-MediatR / Handler
-           │
-           ▼
-Domain / RLS Rules
-           │
-           ▼
-Database Action
+     ┌─────┬─────┐
+     ▼     ▼     ▼
+Business  Branch  Operation Access
+Role      Access  Dining/Stays/etc.
+owner/    (owner
+admin/    bypass;
+member    explicit
+          grant)
+     │     │     │
+     │     │     ▼
+     │     │   Role
+     │     │     │
+     │     │     ▼
+     │     │  Role Permissions
+     │     │     │
+     │     │     ▼
+     │     │  Staff Overrides
+     │     │     │
+     └─────┴──┬──┘
+              ▼
+   Effective Permission Set
+   (+ branch access verdict)
+              │
+        ┌─────┴─────┐
+        ▼           ▼
+    L1 Memory     Redis
+        │           │
+        └─────┬─────┘
+              ▼
+    Authorization Policy
+   (permission AND branch)
+              │
+              ▼
+      MediatR / Handler
+              │
+              ▼
+      Domain / RLS Rules
+              │
+              ▼
+       Database Action
 ```
 
 ---
@@ -1538,6 +1763,9 @@ Membership
 
 Business Role
 → What business-level administration can you perform?
+
+Branch Access
+→ Which physical location's data can you see or act on?
 
 Operation Role
 → What can you do inside this operation?

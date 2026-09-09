@@ -226,7 +226,7 @@ Deletion (GDPR soft delete):
 ## JWT Design
 
 ```
-JWT_1 (Access Token):
+JWT_1 (Access Token — global identity, issued at /auth/login):
 {
   "sub": "user_id",
   "email": "arun@gmail.com",
@@ -240,6 +240,8 @@ Signing: RS256 (asymmetric)
   → Public key verifies (can share with other services)
   → More secure than HS256 (symmetric)
 ```
+
+JWT_1 deliberately carries **no business context**. A user can belong to many businesses (`onenex.ai/rio-jaffna`, `onenex.ai/bella-salon`, ...); embedding one business_id in the login token would be wrong the moment they need a second business. See "Business Context & Portal Access" below for JWT_2, the business-scoped token minted after a business is selected.
 
 ---
 
@@ -512,6 +514,127 @@ Always return same message — don't reveal if email exists in system.
 
 ---
 
+## Business Context & Portal Access
+
+> Cross-module flow: Identity (who) + Membership (which businesses/branches, what role) + Business (resolve slug → business identity). This is the "One Account. Many Businesses. One Business at a Time." flow from the product design.
+
+### Why a Second Token
+
+A OneNex login is business-agnostic — the same account can be staff at Rio Restaurant, Bella Salon and Dzine Retail, each with a different role and branch scope. JWT_1 (above) only proves *who* logged in. Every business-scoped API call needs to know *which business* the request is operating in, and that context must be **verified against membership on every request** — never trusted from a client-selected value (see Membership module → Multi-Business / Tenant Isolation).
+
+The solution is a second, short-lived token minted only after the user has picked a business:
+
+```
+JWT_2 (Business-Scoped Access Token — issued at /auth/select-business):
+{
+  "sub": "user_id",
+  "email": "arun@gmail.com",
+  "business_id": "biz_uuid",
+  "jti": "unique_token_id",
+  "iat": 1234567890,
+  "exp": 1234568790             ← 15 minutes, same lifetime as JWT_1
+}
+```
+
+JWT_2 still carries **no permission list and no branch_id** — permissions are resolved live from Membership on every request (never cached in the token, so a permission change takes effect on the next call, not on next login), and branch is a per-request/per-resource concern checked against `staff_branch_access`, not a session-wide claim (a portal may let a user look at multiple branches' worth of data in one session, filtered by what they're allowed to see — it is not a single fixed value like business_id).
+
+### The Three-Step Flow
+
+```
+Step 1 — Owner Portal Login (OneNex/Login)
+  POST /auth/login → JWT_1 + refresh token
+  GET  /auth/me/memberships (JWT_1) → list of every business this user
+       belongs to, with business_role + accessible branches
+       (delegates to Membership.GetMyMemberships — see Membership module)
+
+Step 2 — Select Business & Branch
+  User picks a business (e.g. "Rio Restaurant") from the Owner Portal list
+  POST /auth/select-business { businessId } (JWT_1) → JWT_2
+       Identity verifies the membership exists and is active
+       (calls IMembershipService.IsActiveMember — 401/403 if not)
+
+Step 3 — Business Portal (onenex.ai/{business-slug})
+  All API calls now carry JWT_2
+  Business module resolves the slug → businessId (GET /api/businesses/resolve/{slug})
+       to confirm the URL matches the token's business_id
+  Every branch-scoped request is still checked against staff_branch_access
+       independently — JWT_2 proves "this business", not "every branch in it"
+```
+
+### No In-Portal Business Switcher — By Design
+
+Once inside a Business Portal, there is no control to switch to a different business. Switching means returning to the Owner Portal (or logging in again) and repeating Step 2. This is intentional isolation, not a missing feature: it keeps a business-scoped session from ever silently carrying data across tenants. A branch switcher/filter *within* the current business portal is fine (see Membership module) — that is a different business's worth of isolation from a different branch's worth of isolation.
+
+### New APIs
+
+#### GET /auth/me/memberships
+
+**Request:** (JWT_1 in Authorization header)
+
+**Response (200):**
+```json
+{
+  "memberships": [
+    {
+      "businessId": "uuid",
+      "businessName": "Rio Restaurant",
+      "slug": "rio-jaffna",
+      "businessRole": "manager",
+      "branches": [
+        { "branchId": "uuid", "name": "Jaffna Branch", "isHeadquarters": true },
+        { "branchId": "uuid", "name": "Colombo Branch", "isHeadquarters": false }
+      ]
+    },
+    {
+      "businessId": "uuid",
+      "businessName": "Bella Salon",
+      "slug": "bella-salon",
+      "businessRole": "staff",
+      "branches": [
+        { "branchId": "uuid", "name": "Jaffna Branch", "isHeadquarters": true }
+      ]
+    }
+  ]
+}
+```
+
+Powers the Owner Portal's business list/switcher. Delegates entirely to `IMembershipService.GetMyMemberships` — Identity does not know about roles or branches itself.
+
+---
+
+#### POST /auth/select-business
+
+**Request:** (JWT_1 in Authorization header)
+```json
+{
+  "businessId": "uuid"
+}
+```
+
+**Response (200):**
+```json
+{
+  "accessToken": "jwt_2_token",
+  "expiresIn": 900
+}
+```
+
+**Errors:**
+```
+403 → No active membership for this business (never reveal whether the business exists to a non-member)
+401 → JWT_1 invalid/expired
+```
+
+**What happens internally:**
+```
+1. Validate JWT_1
+2. IMembershipService.IsActiveMember(userId, businessId) → 403 if false
+3. Generate JWT_2 { sub, email, business_id }
+4. Return JWT_2 (no new refresh token — refresh still rotates against JWT_1's session)
+```
+
+---
+
 ## Security Checklist
 
 ```
@@ -527,6 +650,9 @@ Always return same message — don't reveal if email exists in system.
 ✓ Soft delete → GDPR compliant
 ✓ Rate limiting → resend verification max 3/hour
 ✓ HTTPS only → all endpoints
+✓ JWT_2 → business context re-verified against membership on every /auth/select-business call, never trusted from JWT_1 or client input
+✓ JWT_2 → carries no permission list and no branch_id; both re-checked live per request
+✓ SecurityStamp change (password reset/suspension) → invalidates JWT_2s too, since they derive from the same user identity
 ```
 
 ---
@@ -557,7 +683,11 @@ OneNex.Identity/
 │   │   ├── ForgotPassword/
 │   │   ├── ResetPassword/
 │   │   ├── RefreshToken/
-│   │   └── Logout/
+│   │   ├── Logout/
+│   │   ├── GetMyMemberships/       ← delegates to IMembershipService
+│   │   └── SelectBusiness/
+│   │       ├── SelectBusinessCommand.cs
+│   │       └── SelectBusinessHandler.cs   ← mints JWT_2
 │   └── Interfaces/
 │       └── IJwtService.cs
 │
@@ -632,13 +762,20 @@ PUBLIC (no token needed):
   POST /auth/reset-password
   POST /auth/refresh-token
 
-PROTECTED (token required):
+PROTECTED (JWT_1 required):
   GET  /auth/me
+  GET  /auth/me/memberships
+  POST /auth/select-business
   POST /auth/logout
   POST /auth/logout-all
   GET  /auth/sessions          (Phase 2)
   DELETE /auth/sessions/{id}   (Phase 2)
-  --- ALL other module endpoints ---
+
+PROTECTED (JWT_2 required — business-scoped):
+  --- ALL business-portal / operation module endpoints ---
+  (Dining, Stays, Bar, Wellness, Events, Retail, Membership staff
+   management, Business settings, etc. — anything that operates
+   "inside" a specific business)
 ```
 
 **Token expiry flow:**
@@ -716,3 +853,6 @@ Phase 3: Public API program for third-party developers
 - Multiple devices: one refresh token per device or unlimited?
 - SecurityStamp validation per request: V1 or Phase 2?
 - API keys: store in Identity module or Business module?
+- JWT_2 lifetime: same 15 minutes as JWT_1, or longer since re-selecting a business is cheap and frequent (e.g. multi-business owners bouncing between portals)?
+- JWT_2 refresh: does `/auth/refresh-token` need a business-scoped variant, or does a expired JWT_2 always fall back to re-running `/auth/select-business` with the still-valid JWT_1?
+- Should `/auth/me/memberships` be cached client-side with a short TTL to avoid a round trip on every Owner Portal visit, given membership/role changes are infrequent?
