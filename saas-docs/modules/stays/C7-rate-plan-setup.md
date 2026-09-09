@@ -402,7 +402,11 @@ closed_to_departure   bool. CTD — no check-outs on these dates.
                       Example: New Year's Eve — guests must stay through.
 
 priority              int. If two overrides overlap, higher priority number wins.
+is_recurring          bool
+is_active             bool
+
 ```
+
 
 **DateOverride vs DayRule — which wins?**
 ```
@@ -415,6 +419,24 @@ Reason: DateOverride is an explicit decision ("this exact date = LKR 22,000").
 ```
 
 ---
+
+### Entity 3b: `RatePlanDateOverriderecurrences` 
+
+```
+id
+override_id           FK , NOT NULL
+recurrence_type       Annually/Monthly/Weekly 
+                     
+
+Recurrence_rule        JSONB 
+                       {"pattern":"NTH_WEEKDAY","week":1,"dayOfWeek":1} 
+
+
+is_active             bool
+created_at
+updated_at
+
+```
 
 ### Entity 4: `RatePlanDayRule` — Weekday / Weekend Multipliers
 
