@@ -1,402 +1,700 @@
-# Business Module — Design Document
+# OneNex Business Module — Final Implementation Design
 
-> Draft — Core module. Reviewed and finalized during architecture planning.
-> This module manages business registration, operations enablement, hours, images, settings, and tax configuration.
+> Revised architecture incorporating the identified gaps and decisions.
+>
+> **Core principle:** Business identity ≠ enabled operation ≠ subscription entitlement ≠ authorization.
 
----
+## 1. Module Responsibility
 
-## Module Responsibility
+The Business module owns business identity and business-level configuration.
 
-The Business module owns everything about a business entity:
-- Business core identity and locale
-- Business profile (contact details)
-- Business address and geo coordinates
-- Business images (logo, cover, gallery)
-- Operations enablement (Dining, Stays, Bar, Wellness, Events, Retail)
-- Add-on enablement per operation
-- Subscription tracking per operation
-- Operating hours (regular + exceptions)
+### Business module owns
+
+- Business core identity and locale(a place where something happens or is set, or that has particular events associated with it)
+- Business profile and contact information
+- Business address
+- Business images
+- Enabled operations
+- Operation add-on enablement
+- Business-level operating hours
+- Business-hour exceptions
 - Business-wide settings
-- Tax rate definitions and operation-level tax mapping
+- Tax definitions
+- Operation-level tax mapping
+- Business lifecycle state
+- Slug history
 
-**What Business module does NOT own:**
-- Staff identities (Identity module)
-- Staff roles and permissions (Membership module)
-- Actual dining/stays/bar operations (Operation modules)
-- Payment processing (Payment Service)
-- Notifications (Notification Service)
+### Business module does NOT own
 
----
-
-## Domain Events Published
-
-```
-BusinessCreatedEvent            → Membership module: auto-create owner membership record
-BusinessOperationEnabledEvent   → Operation module: initialize module data (menus, tables...)
-BusinessOperationDisabledEvent  → Operation module: cleanup / suspend
-BusinessSuspendedEvent          → All modules: block access for this business_id
-```
-
-Business module publishes. It never calls other modules directly.
+- User/staff identity
+- Membership, roles and permissions
+- Actual Dining/Stays/Bar/Wellness/Events/Retail domain behavior
+- Payment charging
+- Subscription plans and invoices
+- Notifications
+- Operation-specific domain configuration
 
 ---
 
-## Entities
+# 2. Operation Model — Enum, Not a Modules Table
 
-### Table 1: `businesses`
 
-Lean core identity. Loaded on every API call for tenant resolution — kept minimal on purpose.
+Operation types are controlled by the application/domain layer.
+
+```csharp
+public enum OperationType     //finalize the enums
+{
+    Dining,
+    Stays,
+    Bar,
+    Wellness,
+    Events,
+    Retail
+}
+```
+
+The database stores stable string values:
+The enum is the controlled catalog.
+
+Adding a new core OneNex operation requires a code deployment/migration.
+---
+
+# 3. Core Database Schema
+
+## 3.1 `businesses`
 
 ```sql
 CREATE TABLE businesses (
-    id                  UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    owner_id            UUID            NOT NULL REFERENCES users(id),
-    parent_business_id  UUID            REFERENCES businesses(id),  -- nullable: branch (Phase 2)
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_code       VARCHAR(30) NOT NULL UNIQUE,
+    owner_id            UUID NOT NULL REFERENCES users(id),
+    parent_business_id  UUID REFERENCES businesses(id),
 
-    -- Names
-    legal_name          VARCHAR(200)    NOT NULL,  -- official registered name (invoices, contracts)
-    trading_name        VARCHAR(200)    NOT NULL,  -- what customers see ("The Grand Café")
+    legal_name          VARCHAR(200) NOT NULL,
+    trading_name        VARCHAR(200) NOT NULL,
+    slug                VARCHAR(100) NOT NULL UNIQUE,
 
-    -- URL identity
-    slug                VARCHAR(100)    NOT NULL,  -- {slug}.onenex.com — globally unique
+    country_code        CHAR(2) NOT NULL,
+    timezone            VARCHAR(50) NOT NULL,
+    currency_code       CHAR(3) NOT NULL,
+    default_language    CHAR(2) NOT NULL DEFAULT 'en',
 
-    -- Locale (needed on every request: currency formatting, timezone display)
-    country_code        CHAR(2)         NOT NULL,  -- ISO 3166-1 alpha-2: LK, SG, GB, US
-    timezone            VARCHAR(50)     NOT NULL,  -- IANA: Asia/Colombo, Asia/Singapore
-    currency_code       CHAR(3)         NOT NULL,  -- ISO 4217: LKR, SGD, USD
-    default_language    CHAR(2)         NOT NULL DEFAULT 'en',  -- ISO 639-1
+    contact_email       VARCHAR(254),
+    contact_phone       VARCHAR(30),
 
-    -- Lifecycle
-    status              VARCHAR(20)     NOT NULL DEFAULT 'active',
-    -- active | suspended | closed
-    activated_at        TIMESTAMP WITH TIME ZONE,  -- when business first went live (≠ created_at)
-    created_at          TIMESTAMP WITH TIME ZONE   NOT NULL DEFAULT NOW(),
-    updated_at          TIMESTAMP WITH TIME ZONE   NOT NULL DEFAULT NOW(),
+    status              VARCHAR(20) NOT NULL DEFAULT 'active',
+    onboarding_status   VARCHAR(30) NOT NULL DEFAULT 'setup',
 
-    CONSTRAINT businesses_slug_unique UNIQUE (slug)
+    activated_at        TIMESTAMPTZ,
+    suspended_at        TIMESTAMPTZ,
+    closed_at           TIMESTAMPTZ,
+
+    version             BIGINT NOT NULL DEFAULT 1,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT chk_business_status
+        CHECK (status IN ('active','suspended','closed')),
+
+    CONSTRAINT chk_onboarding_status
+        CHECK (onboarding_status IN ('setup','ready','completed'))
 );
 
-CREATE INDEX idx_businesses_owner_id   ON businesses(owner_id);
-CREATE INDEX idx_businesses_status     ON businesses(status);
-CREATE INDEX idx_businesses_slug       ON businesses(slug);
+CREATE INDEX idx_businesses_owner_id
+    ON businesses(owner_id);
+
+CREATE INDEX idx_businesses_status
+    ON businesses(status);
+
+CREATE INDEX idx_businesses_slug
+    ON businesses(slug);
 ```
 
-**Design notes:**
+### Purpose
 
-| Field | Why |
+`businesses` is the lean tenant identity.
+
+It answers:
+
+> **Who is this business?**
+
+It does not answer which OneNex operations are enabled or what subscription it has.
+
+### Important fields
+
+| Field | Purpose |
 |---|---|
-| `legal_name` | Official registered name — tax invoices, legal documents |
-| `trading_name` | Display name customers see — can differ from legal name |
-| `slug` | URL identity — must be set from day 1 even though V1 uses `app.onenex.com` |
-| `country_code` | Drives tax logic and locale defaults on every request |
-| `timezone` | All timestamps stored UTC, displayed in business timezone |
-| `currency_code` | Drives all billing and reporting |
-| `activated_at` | Business can be created but not yet live — marks "first day open" |
-| `parent_business_id` | Future-ready for branches (Phase 2). Nullable in V1. No branch logic in V1. |
+| `business_code` | Stable business identifier |
+| `owner_id` | Original/legal owner reference |
+| `slug` | URL identity |
+| `country_code` | Locale/tax context |
+| `timezone` | Business-local time |
+| `currency_code` | Default currency |
+| `status` | Business lifecycle |
+| `onboarding_status` | Setup/readiness |
+| `version` | Optimistic concurrency |
 
-**Status values:**
-- `active` — operating normally
-- `suspended` — payment issue or admin action — staff cannot access
-- `closed` — permanently closed — data retained for compliance
+`owner_id` is **not** an authorization mechanism.
+**But versioning is not mandatory** 
+Since you're using DDD + CQRS, this becomes even more useful.
+
+Your command can carry:
+
+public record UpdateBusinessCommand(
+    Guid BusinessId,
+    string TradingName,
+    long ExpectedVersion
+);
+
+Then the aggregate/repository can enforce:
+
+ExpectedVersion == CurrentVersion
+        ↓
+       YES → apply change → version++
+        ↓
+       NO → concurrency conflict
 
 ---
 
-### Table 2: `business_profiles`
+## 3.2 `business_slug_history`
 
-Contact details. Loaded on demand — profile page, directory listings.
+```sql
+CREATE TABLE business_slug_history (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id  UUID NOT NULL REFERENCES businesses(id),
+    slug         VARCHAR(100) NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    replaced_at  TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX uq_business_slug_history_slug
+    ON business_slug_history(slug);
+```
+
+### Purpose
+
+When:
+
+```text
+grandhotel.onenex.com
+```
+
+changes to:
+
+```text
+grandhotel-colombo.onenex.com
+```
+
+the old slug remains in history.
+
+This allows old bookmarks, QR codes and URLs to redirect.
+
+---
+
+# 4. Business Profile
+
+## `business_profiles`
 
 ```sql
 CREATE TABLE business_profiles (
-    id              UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_id     UUID            NOT NULL UNIQUE REFERENCES businesses(id),  -- 1:1
-
-    phone           VARCHAR(20),
-    email           VARCHAR(255),
-    website_url     VARCHAR(500),
-    description     TEXT,
-
-    updated_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id  UUID NOT NULL UNIQUE REFERENCES businesses(id),
+    phone        VARCHAR(30),
+    email        VARCHAR(254),
+    website_url  VARCHAR(500),
+    description  TEXT,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
 
-**Why split from `businesses`?**
+If multiple contacts become necessary, introduce:
+
+```text
+business_contacts
 ```
-businesses       → loaded on EVERY API call (tenant resolution, JWT context) — must stay lean
-business_profiles → loaded only when needed: profile read/update, directory listing
+
+with:
+
+```text
+contact_type
+name
+phone
+email
 ```
 
 ---
 
-### Table 3: `business_addresses`
+# 5. Business Address
 
-Physical location. Loaded on demand — maps, delivery, receipts.
+## `business_addresses`
 
 ```sql
 CREATE TABLE business_addresses (
-    id              UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_id     UUID            NOT NULL UNIQUE REFERENCES businesses(id),  -- 1:1
-
-    address_line1   VARCHAR(255),
-    address_line2   VARCHAR(255),
-    city            VARCHAR(100),
-    state           VARCHAR(100),  -- state / province / region
-    postal_code     VARCHAR(20),
-    -- country_code lives in businesses table (needed for locale on every request)
-
-    -- Geo coordinates (maps, delivery radius)
-    latitude        DECIMAL(10, 7),
-    longitude       DECIMAL(10, 7),
-
-    updated_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id   UUID NOT NULL UNIQUE REFERENCES businesses(id),
+    address_line1 VARCHAR(255),
+    address_line2 VARCHAR(255),
+    city          VARCHAR(100),
+    state         VARCHAR(100),
+    postal_code   VARCHAR(20),
+    latitude      DECIMAL(10,7),
+    longitude     DECIMAL(10,7),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
 
-> `country_code` stays in `businesses` — needed for tax/locale on every request.
-> Address table = display and geo only.
+V1 supports one primary business address.
+
+For Phase 2, do not automatically treat `parent_business_id` as the final branch design. A dedicated Business → Locations/Branches model may be cleaner.
 
 ---
 
-### Table 4: `business_images`
+# 6. Business Images
 
-Logo, cover, gallery images. 1:many. Typed.
+## `business_images`
 
 ```sql
 CREATE TABLE business_images (
-    id              UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_id     UUID            NOT NULL REFERENCES businesses(id),
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id   UUID NOT NULL REFERENCES businesses(id),
+    image_type    VARCHAR(20) NOT NULL,
+    storage_key   VARCHAR(500) NOT NULL,
+    url           VARCHAR(500),
+    mime_type     VARCHAR(100),  
+    A MIME type (Multipurpose Internet Mail Extensions) is a standardized way to indicate the nature and format of a file so that browsers, APIs, or applications know how to handle it. Eg: image/png
+    file_size     BIGINT,
+    width         INTEGER,
+    height        INTEGER,
+    alt_text      VARCHAR(200),
+    display_order SMALLINT NOT NULL DEFAULT 0,
+    is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    image_type      VARCHAR(20)     NOT NULL,
-    -- logo | cover | gallery
-
-    url             VARCHAR(500)    NOT NULL,
-    alt_text        VARCHAR(200),
-    display_order   SMALLINT        NOT NULL DEFAULT 0,
-    is_active       BOOLEAN         NOT NULL DEFAULT true,
-
-    created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    CONSTRAINT chk_image_type
+        CHECK (image_type IN ('logo','cover','gallery'))
 );
 
 CREATE INDEX idx_business_images_business_type
     ON business_images(business_id, image_type);
+
+CREATE UNIQUE INDEX uq_business_active_logo
+    ON business_images(business_id)
+    WHERE image_type = 'logo'
+      AND is_active = TRUE;
 ```
 
-**Image types:**
-
-| Type | Description |
-|---|---|
-| `logo` | Main brand logo — one active at a time |
-| `cover` | Hero / banner image |
-| `gallery` | Multiple images — `display_order` controls sequence |
+The partial unique index guarantees only one active logo while allowing historical logos.
 
 ---
 
-### Table 5: `business_operations`
+# 7. Business Operations — Single Source of Truth
 
-Which operations are enabled per business. Subscription state only — Business module's actual concern.
+`business_operations` replaces both the previous modules/business_modules concept and the operation enablement portion of the original model.
 
-Operation-specific config (order prefix, kitchen buffer, check-in time etc.) lives inside each operation's own module — not here.
+It answers:
+
+> **What OneNex operation is enabled for this business?**
+
+It does **not** own subscription billing state.
+
+## `business_operations`
 
 ```sql
 CREATE TABLE business_operations (
-    id                  UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_id         UUID            NOT NULL REFERENCES businesses(id),
-    operation_type      VARCHAR(20)     NOT NULL,
-    -- dining | stays | bar | wellness | events | retail
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id      UUID NOT NULL REFERENCES businesses(id),
+    operation_type   VARCHAR(30) NOT NULL,
 
-    -- Subscription
-    subscription_plan   VARCHAR(20)     NOT NULL,
-    -- starter | professional | enterprise
-    subscription_status VARCHAR(20)     NOT NULL,
-    -- trial | active | past_due | cancelled | suspended
-    billing_cycle       VARCHAR(10)     NOT NULL,
-    -- monthly | annual
-    trial_ends_at       TIMESTAMP WITH TIME ZONE,
-    next_billing_at     TIMESTAMP WITH TIME ZONE,
+    status           VARCHAR(20) NOT NULL DEFAULT 'enabled',
+    enabled_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    disabled_at      TIMESTAMPTZ,
 
-    -- Lifecycle
-    enabled_at          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    disabled_at         TIMESTAMP WITH TIME ZONE,  -- null = currently active
+    version          BIGINT NOT NULL DEFAULT 1,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT business_operations_unique UNIQUE (business_id, operation_type)
+    CONSTRAINT uq_business_operation
+        UNIQUE (business_id, operation_type),
+
+    CONSTRAINT chk_operation_status
+        CHECK (status IN ('enabled','suspended','disabled'))
 );
 
-CREATE INDEX idx_business_operations_business_id ON business_operations(business_id);
-CREATE INDEX idx_business_operations_status      ON business_operations(subscription_status);
+CREATE INDEX idx_business_operations_business
+    ON business_operations(business_id);
+
+CREATE INDEX idx_business_operations_status
+    ON business_operations(status);
 ```
 
-**Module boundary rule:**
+### Example
 
-```
-Business module  → Is Dining enabled? What plan? What billing cycle?
-Dining module    → dining_settings table: order prefix, kitchen buffer, receipt footer...
-Stays module     → stays_settings table: check-in time, check-out time, night audit time...
+Business A initially:
+
+```text
+business_operations
+
+Business A | dining | enabled
 ```
 
-Each operation module creates its own settings row when it handles `BusinessOperationEnabledEvent`.
-Business module does not know what config any operation needs.
+Later:
+
+```text
+Business A | dining | enabled
+Business A | stays  | enabled
+```
+
+The `businesses` record does not change.
+
+This is exactly what is needed when a business starts with Dining and later adds Stays.
 
 ---
 
-### Table 6: `business_operation_addons`
+# 8. Enabled vs Configured vs Ready
 
-Add-ons enabled per operation. Normalized from JSONB array — proper table for queryability and audit.
+A critical distinction:
+
+> **Enabled does not mean Ready.**
+
+Example:
+
+```text
+Stays enabled
+        ↓
+No room types
+        ↓
+Not ready for reservations
+```
+
+Recommended conceptual states:
+
+| State | Meaning |
+|---|---|
+| `enabled` | Operation has been activated |
+| `configuring` | Setup is in progress |
+| `ready` | Operation-specific readiness requirements pass |
+| `suspended` | Temporarily unavailable |
+| `disabled` | Not currently offered |
+
+The Business module can own enablement/lifecycle.
+
+The actual readiness rules belong to the operation module.
+
+For example:
+
+### Stays module
+
+```text
+room types configured?
+rates configured?
+availability configured?
+policies configured?
+```
+
+Only the Stays module should decide whether Stays is fully ready.
+
+---
+
+# 9. Operation Add-ons
+
+## `business_operation_addons`
 
 ```sql
 CREATE TABLE business_operation_addons (
-    id                      UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_operation_id   UUID            NOT NULL REFERENCES business_operations(id),
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_operation_id UUID NOT NULL REFERENCES business_operations(id),
+    addon_type            VARCHAR(50) NOT NULL,
 
-    addon_type              VARCHAR(50)     NOT NULL,
-    -- dining:  reservation | qr_ordering | kds | delivery | takeaway
-    -- stays:   housekeeping | maintenance | channel_manager
-    -- bar:     kds
+    is_active             BOOLEAN NOT NULL DEFAULT TRUE,
+    config                JSONB NOT NULL DEFAULT '{}',
 
-    is_active               BOOLEAN         NOT NULL DEFAULT true,
-    config                  JSONB           NOT NULL DEFAULT '{}',
+    enabled_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    disabled_at           TIMESTAMPTZ,
 
-    enabled_at              TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    disabled_at             TIMESTAMP WITH TIME ZONE,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT business_operation_addons_unique UNIQUE (business_operation_id, addon_type)
+    CONSTRAINT uq_business_operation_addon
+        UNIQUE (business_operation_id, addon_type)
 );
 
-CREATE INDEX idx_addons_operation_id ON business_operation_addons(business_operation_id);
-CREATE INDEX idx_addons_type         ON business_operation_addons(addon_type);
+CREATE INDEX idx_addons_operation_id
+    ON business_operation_addons(business_operation_id);
 ```
 
-**Why proper table (not JSONB array):**
+Example:
 
+```text
+Dining
+ ├── reservation
+ ├── qr_ordering
+ ├── kds
+ ├── delivery
+ └── takeaway
 ```
-JSONB ["reservation", "kds"]  → no FK, no audit trail, no per-addon config, no queryability
-Proper table                  → "how many businesses have KDS?" is a simple query
-                              → enabled_at per addon, config per addon, full audit trail
+
+Add-on dependency:
+
+```text
+KDS
+ ↓
+requires Dining
 ```
+
+Dependencies are enforced in the application/domain layer.
 
 ---
 
-### Table 7: `business_hours`
+# 10. Subscription and Billing — Separate Module
 
-Regular weekly schedule. 7 rows per business (auto-created on business creation).
+Remove these fields from `business_operations`:
+
+```text
+subscription_plan
+subscription_status
+billing_cycle
+trial_ends_at
+next_billing_at
+```
+
+Those fields mix two different concepts.
+
+## Business Operations
+
+Answers:
+
+> Is Dining enabled?
+
+## Subscription
+
+Answers:
+
+> Is this business commercially entitled to Dining?
+
+## Billing
+
+Answers:
+
+> What should be charged and has payment succeeded?
+
+The Subscription & Billing module should own concepts such as:
+
+```text
+subscriptions
+subscription_items
+plans
+invoices
+payment status
+billing periods
+trial
+cancellation
+```
+
+Conceptually:
+
+```text
+subscriptions
+    id
+    business_id
+    plan_id
+    status
+    billing_cycle
+    starts_at
+    trial_ends_at
+    current_period_start
+    current_period_end
+    cancelled_at
+    created_at
+    updated_at
+```
+
+```text
+subscription_items
+    id
+    subscription_id
+    operation_type
+    quantity / limits / entitlement data
+    status
+    starts_at
+    ends_at
+```
+
+The exact billing schema belongs to Subscription & Billing.
+
+---
+
+# 11. Business Hours
+
+A single `open_time` / `close_time` pair is insufficient.
+
+Example:
+
+```text
+Monday
+11:00–15:00
+17:00–23:00
+```
+
+Therefore use a parent schedule + interval table.
+
+## `business_hours`
 
 ```sql
 CREATE TABLE business_hours (
-    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_id     UUID        NOT NULL REFERENCES businesses(id),
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id   UUID NOT NULL REFERENCES businesses(id),
+    day_of_week   SMALLINT NOT NULL,
+    is_open       BOOLEAN NOT NULL DEFAULT TRUE,
 
-    day_of_week     SMALLINT    NOT NULL,
-    -- 0=Sunday, 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    is_open         BOOLEAN     NOT NULL DEFAULT true,
-    open_time       TIME,                      -- null if is_open=false OR is_open_all_day=true
-    close_time      TIME,                      -- null if is_open=false OR is_open_all_day=true
-    closes_next_day BOOLEAN     NOT NULL DEFAULT false,
-    -- bar opens 18:00, closes 03:00 → close_time='03:00', closes_next_day=true
-    is_open_all_day BOOLEAN     NOT NULL DEFAULT false,
-    -- hotel front desk 24hr → is_open_all_day=true, open_time/close_time null
+    UNIQUE (business_id, day_of_week),
 
-    CONSTRAINT business_hours_unique    UNIQUE (business_id, day_of_week),
-    CONSTRAINT business_hours_day_range CHECK  (day_of_week BETWEEN 0 AND 6)
+    CHECK (day_of_week BETWEEN 0 AND 6)
 );
+```
+
+## `business_hour_intervals`
+
+```sql
+CREATE TABLE business_hour_intervals (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_hours_id  UUID NOT NULL REFERENCES business_hours(id),
+
+    open_time          TIME NOT NULL,
+    close_time         TIME NOT NULL,
+    closes_next_day    BOOLEAN NOT NULL DEFAULT FALSE,
+
+    display_order      SMALLINT NOT NULL DEFAULT 0,
+
+    UNIQUE (business_hours_id, display_order)
+);
+```
+
+### Example
+
+```text
+Monday
+ ├── 11:00 → 15:00
+ └── 17:00 → 23:00
+```
+
+For overnight:
+
+```text
+18:00 → 03:00
+closes_next_day = true
 ```
 
 ---
 
-### Table 8: `business_hour_exceptions`
+# 12. Operation-Specific Hours
 
-Date-range overrides. Single day or multi-day. Exception always wins over regular schedule.
+Overall business hours are not necessarily operation hours.
+
+Example:
+
+```text
+Hotel
+ └── Business hours: 24/7
+
+Dining
+ └── 07:00–22:00
+
+Spa
+ └── 09:00–20:00
+```
+
+Therefore:
+
+- Business module owns overall business hours.
+- Dining owns Dining-specific hours.
+- Stays owns Stays-specific hours.
+- Bar owns Bar-specific hours.
+
+The final transaction check may combine:
+
+```text
+Business active?
+        +
+Operation enabled?
+        +
+Operation ready?
+        +
+Operation open?
+```
+
+---
+
+# 13. Business Hour Exceptions
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 CREATE TABLE business_hour_exceptions (
-    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_id     UUID        NOT NULL REFERENCES businesses(id),
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id      UUID NOT NULL REFERENCES businesses(id),
 
-    start_date      DATE        NOT NULL,
-    end_date        DATE        NOT NULL,
-    -- single day  → start_date = end_date  (Christmas Day)
-    -- date range  → start_date < end_date  (Ramadan schedule, renovation)
+    start_date       DATE NOT NULL,
+    end_date         DATE NOT NULL,
 
-    is_closed       BOOLEAN     NOT NULL DEFAULT false,
-    open_time       TIME,                      -- null if is_closed or is_open_all_day
-    close_time      TIME,                      -- null if is_closed or is_open_all_day
-    closes_next_day BOOLEAN     NOT NULL DEFAULT false,
-    is_open_all_day BOOLEAN     NOT NULL DEFAULT false,
+    is_closed        BOOLEAN NOT NULL DEFAULT FALSE,
+    is_open_all_day  BOOLEAN NOT NULL DEFAULT FALSE,
 
-    reason          VARCHAR(100),
-    -- "Christmas Day", "Ramadan Schedule", "New Year's Eve", "Renovation"
+    reason           VARCHAR(200),
 
-    CONSTRAINT exception_dates_valid       CHECK (end_date >= start_date),
-    CONSTRAINT no_overlapping_exceptions   EXCLUDE USING gist (
-        business_id WITH =,
-        daterange(start_date, end_date, '[]') WITH &&
-    )
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT chk_exception_dates
+        CHECK (end_date >= start_date),
+
+    CONSTRAINT no_overlapping_business_exceptions
+        EXCLUDE USING gist (
+            business_id WITH =,
+            daterange(start_date, end_date, '[]') WITH &&
+        )
 );
-
-CREATE INDEX idx_hour_exceptions_business_dates
-    ON business_hour_exceptions(business_id, start_date, end_date);
 ```
 
-**Query logic — "Is this business open at 7pm on 2025-12-25?"**
+### Rule
 
-```sql
--- Step 1: check for exception covering this date
-SELECT * FROM business_hour_exceptions
-WHERE business_id = ?
-  AND start_date <= '2025-12-25'
-  AND end_date   >= '2025-12-25';
--- Found: is_closed = true → CLOSED. Stop.
+> Exception always wins over regular schedule.
 
--- Step 2: no exception found → fall back to regular schedule
-SELECT * FROM business_hours
-WHERE business_id = ? AND day_of_week = 4;  -- Thursday
--- is_open=true, open_time=09:00, close_time=22:00 → 19:00 is within range → OPEN
+Example:
+
+```text
+Normal:
+Monday 09:00–22:00
+
+Christmas:
+Closed
+
+Result:
+Christmas exception wins.
 ```
 
-**Rule: exception always wins over regular schedule.**
-
-**Usage examples:**
-
-```
-Ramadan 2025 (30 days):
-  start_date='2025-03-01', end_date='2025-03-30'
-  open_time='18:00', close_time='23:00'
-  reason='Ramadan Schedule'
-
-Christmas Day (single day, closed):
-  start_date='2025-12-25', end_date='2025-12-25'
-  is_closed=true
-  reason='Christmas Day'
-
-New Year's Eve (single day, late close):
-  start_date='2025-12-31', end_date='2025-12-31'
-  open_time='09:00', close_time='03:00', closes_next_day=true
-  reason="New Year's Eve"
-
-Renovation (week closed):
-  start_date='2025-08-10', end_date='2025-08-17'
-  is_closed=true
-  reason='Annual Renovation'
-```
+If exceptions need different opening intervals, introduce exception interval rows similar to `business_hour_intervals`.
 
 ---
 
-### Table 9: `business_settings`
-
-Business-wide display preferences only. No operation-specific config here.
+# 14. Business Settings
 
 ```sql
 CREATE TABLE business_settings (
-    id          UUID    PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_id UUID    NOT NULL UNIQUE REFERENCES businesses(id),  -- 1:1
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id UUID NOT NULL UNIQUE REFERENCES businesses(id),
 
-    settings    JSONB   NOT NULL DEFAULT '{}',
+    settings    JSONB NOT NULL DEFAULT '{}',
 
-    updated_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    version     BIGINT NOT NULL DEFAULT 1,
+    updated_by  UUID REFERENCES users(id),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
 
-**JSONB contains global-only settings — applies equally to ALL operations:**
+Use JSONB for genuinely global/display settings:
 
 ```json
 {
@@ -407,239 +705,445 @@ CREATE TABLE business_settings (
 }
 ```
 
-**Rule:**
-```
-If a setting is operation-specific   → business_operations.config (owned by that operation)
-If a setting needs querying          → proper column / proper table
-If a setting is truly global/display → business_settings JSONB
+### Rule
+
+```text
+Operation-specific
+    → operation module
+
+Needs querying/filtering/constraints
+    → proper column/table
+
+Truly global/display preference
+    → business_settings JSONB
 ```
 
 ---
 
-### Table 10: `business_tax_rates`
+# 15. Tax Model
 
-Tax rate master list. Defined at business level (jurisdiction). Rates are referenced by billing in operation modules.
+Tax registration, tax definitions, applicability and transaction snapshots are separate concepts.
+
+---
+
+## 15.1 Tax Profile
+
+```sql
+CREATE TABLE business_tax_profiles (
+    id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id               UUID NOT NULL UNIQUE REFERENCES businesses(id),
+
+    tax_identification_number VARCHAR(100),
+    tax_registration_number   VARCHAR(100),
+    tax_regime                VARCHAR(100),
+
+    default_tax_inclusive     BOOLEAN NOT NULL DEFAULT FALSE,
+
+    status                    VARCHAR(20) NOT NULL DEFAULT 'active',
+
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+This stores the business's tax registration/profile information.
+
+---
+
+# 16. Tax / Charge Definitions
+
+A business may have:
+
+- VAT
+- GST
+- Tourism Levy
+- Service Charge
+- Government fee
+
+These are not all technically the same kind of charge.
+
+Therefore distinguish them.
+
+## `business_tax_rates`
 
 ```sql
 CREATE TABLE business_tax_rates (
-    id          UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_id UUID            NOT NULL REFERENCES businesses(id),
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_id         UUID NOT NULL REFERENCES businesses(id),
 
-    name        VARCHAR(100)    NOT NULL,  -- "VAT", "Service Charge", "GST", "Tourism Levy"
-    code        VARCHAR(20),              -- short code for receipts: "VAT", "SC", "TL"
-    rate        DECIMAL(5,2)    NOT NULL, -- 15.00 = 15%
+    name                VARCHAR(100) NOT NULL,
+    code                VARCHAR(50) NOT NULL,
 
-    is_active   BOOLEAN         NOT NULL DEFAULT true,
-    -- deactivated rates kept for historical order reference
+    charge_type         VARCHAR(30) NOT NULL,
 
-    created_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    rate                NUMERIC(7,4) NOT NULL,
+
+    calculation_method  VARCHAR(30) NOT NULL DEFAULT 'percentage',
+    calculation_order   SMALLINT NOT NULL DEFAULT 1,
+    is_compound         BOOLEAN NOT NULL DEFAULT FALSE,
+
+    effective_from      DATE NOT NULL,
+    effective_to        DATE,
+
+    is_active            BOOLEAN NOT NULL DEFAULT TRUE,
+
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_business_tax_code_version
+        UNIQUE (business_id, code, effective_from),
+
+    CONSTRAINT chk_charge_type
+        CHECK (
+            charge_type IN
+            ('tax','levy','service_charge','fee')
+        ),
+
+    CONSTRAINT chk_calculation_method
+        CHECK (
+            calculation_method IN
+            ('percentage','fixed')
+        ),
+
+    CONSTRAINT chk_rate
+        CHECK (rate >= 0 AND rate <= 100),
+
+    CONSTRAINT chk_effective_dates
+        CHECK (
+            effective_to IS NULL
+            OR effective_to >= effective_from
+        )
 );
 
-CREATE INDEX idx_business_tax_rates_business_id ON business_tax_rates(business_id);
+CREATE INDEX idx_business_tax_rates_lookup
+    ON business_tax_rates(
+        business_id,
+        code,
+        effective_from,
+        effective_to
+    );
 ```
 
 ---
 
-### Table 11: `business_operation_tax_rates`
+# 17. Why Tax Rates Must Be Versioned
 
-Junction table — which tax rates apply to which operation.
+Suppose:
+
+```text
+VAT
+18%
+effective from 2026-01-01
+```
+
+Later it becomes:
+
+```text
+VAT
+20%
+effective from 2027-01-01
+```
+
+Do **not** update the old row:
+
+```text
+18% → 20%
+```
+
+Instead:
+
+```text
+VAT version 1
+18%
+2026-01-01 → 2026-12-31
+
+VAT version 2
+20%
+2027-01-01 → NULL
+```
+
+This allows historical transactions to reproduce their original calculation.
+
+---
+
+# 18. Operation Tax Mapping
+
+## `business_operation_tax_rates`
 
 ```sql
 CREATE TABLE business_operation_tax_rates (
-    id                      UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_operation_id   UUID        NOT NULL REFERENCES business_operations(id),
-    tax_rate_id             UUID        NOT NULL REFERENCES business_tax_rates(id),
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-    is_auto_applied         BOOLEAN     NOT NULL DEFAULT true,
-    -- true  = automatically applied to every order in this operation
-    -- false = optional, staff selects manually (e.g., government exemption cases)
+    business_operation_id UUID NOT NULL
+        REFERENCES business_operations(id),
 
-    CONSTRAINT operation_tax_rate_unique UNIQUE (business_operation_id, tax_rate_id)
+    tax_rate_id           UUID NOT NULL
+        REFERENCES business_tax_rates(id),
+
+    is_auto_applied       BOOLEAN NOT NULL DEFAULT TRUE,
+
+    priority              SMALLINT NOT NULL DEFAULT 1,
+
+    UNIQUE (business_operation_id, tax_rate_id)
 );
+
+CREATE INDEX idx_operation_tax_rates_operation
+    ON business_operation_tax_rates(business_operation_id);
 ```
 
-**Example data — Sri Lanka hotel:**
+### Example
 
+Sri Lankan hotel:
+
+```text
+Tax definitions
+
+VAT             18%
+Service Charge  10%
+Tourism Levy     2%
 ```
-business_tax_rates:
-  [1] VAT              18%
-  [2] Service Charge   10%
-  [3] Tourism Levy      2%
 
-business_operation_tax_rates:
-  Dining  → [1] VAT ✓ auto,  [2] SC ✓ auto,  [3] Tourism Levy ✗
-  Stays   → [1] VAT ✓ auto,  [2] SC ✓ auto,  [3] Tourism Levy ✓ auto
-  Retail  → [1] VAT ✓ auto,  [2] SC ✗,        [3] Tourism Levy ✗
+Mapping:
+
+```text
+Dining
+ ├── VAT            auto
+ ├── Service Charge auto
+ └── Tourism Levy   no
+
+Stays
+ ├── VAT            auto
+ ├── Service Charge auto
+ └── Tourism Levy   auto
+
+Retail
+ ├── VAT            auto
+ ├── Service Charge no
+ └── Tourism Levy   no
 ```
 
 ---
 
-## Entity Relationships
+# 19. Tax Calculation Order
 
+When several charges apply, calculation order matters.
+
+For example:
+
+```text
+Base amount
+    ↓
+Service Charge
+    ↓
+VAT
 ```
-users
-  │
-  └── businesses (owner_id)
-        │
-        ├── business_profiles             (1:1)
-        ├── business_addresses            (1:1)
-        ├── business_images               (1:many, typed)
-        ├── business_hours                (1:7 — one per day)
-        ├── business_hour_exceptions      (1:many — date-range overrides)
-        ├── business_settings             (1:1)
-        ├── business_tax_rates            (1:many — master list)
-        └── business_operations           (1:many — one per operation type)
-              │
-              ├── business_operation_addons      (1:many)
-              └── business_operation_tax_rates   (1:many → references tax_rates)
-```
+
+The exact order must follow the applicable tax rules.
+
+`calculation_order` makes the sequence explicit.
+
+`is_compound` alone is not enough to describe complex calculation behavior.
 
 ---
 
-## Module Boundary
+# 20. Tax Applicability — V1 Boundary
 
-Business module owns all 11 tables. Other modules access data ONLY through `IBusinessService` in `Shared.Contracts`:
+Operation-level mapping is appropriate for V1.
 
-```csharp
-public interface IBusinessService
-{
-    Task<BusinessDto>    GetBusiness(Guid businessId);
-    Task<bool>           IsOperationEnabled(Guid businessId, string operationType);
-    Task<bool>           IsAddonEnabled(Guid businessId, string operationType, string addonType);
-    Task<string>         GetOperationConfig(Guid businessId, string operationType);
-    Task<bool>           IsBusinessOpen(Guid businessId, DateTime at);
-    Task<List<TaxRateDto>> GetOperationTaxRates(Guid businessId, string operationType);
-}
+However, real-world businesses can require more granular rules.
+
+Dining:
+
+```text
+Food
+Alcohol
+Takeaway
+Delivery
 ```
 
-No other module queries `businesses`, `business_tax_rates`, or any other Business table directly. Ever.
+Stays:
+
+```text
+Room
+Minibar
+Spa
+Laundry
+```
+
+may all have different tax treatment.
+
+Therefore V1 uses:
+
+```text
+Operation → Tax
+```
+
+Later, if necessary:
+
+```text
+Product/Service/Category
+        ↓
+Tax Rule
+        ↓
+Tax Rate
+```
+
+Do not introduce this complexity until actual operation requirements justify it.
 
 ---
 
-## V1 Scope
+# 21. Transaction Tax Snapshot
 
-| Table | V1 | Notes |
+Historical transactions must not depend on today's tax configuration.
+
+When an order/invoice is created, snapshot the calculation:
+
+```text
+tax_code
+tax_name
+charge_type
+rate
+calculation_method
+calculation_order
+taxable_amount
+tax_amount
+is_inclusive
+```
+
+Example:
+
+```text
+Order #1001
+
+VAT
+18%
+Taxable amount: 10,000
+Tax: 1,800
+```
+
+If the business later changes VAT to 20%, Order #1001 remains 18%.
+
+---
+
+# 22. Business Lifecycle
+
+| Status | Meaning | Behavior |
 |---|---|---|
-| `businesses` | Build | Core identity |
-| `business_profiles` | Build | Contact details |
-| `business_addresses` | Build | Physical address + geo |
-| `business_images` | Build | Logo, cover, gallery |
-| `business_operations` | Build | Operations + subscriptions |
-| `business_operation_addons` | Build | Add-ons per operation |
-| `business_hours` | Build | Regular weekly schedule |
-| `business_hour_exceptions` | Build | Holiday/seasonal overrides |
-| `business_settings` | Build | Global display prefs |
-| `business_tax_rates` | Build | Tax master list |
-| `business_operation_tax_rates` | Build | Tax per operation mapping |
-| `business_links` | Phase 2 | Cross-business resource sharing |
-| Full branch logic | Phase 2 | `parent_business_id` field ready |
+| `active` | Operating normally | Normal access |
+| `suspended` | Temporarily blocked | Operational actions blocked; data retained |
+| `closed` | Permanently closed | No new operational transactions; historical data retained |
+
+### Suspended
+
+Possible reasons:
+
+```text
+Payment issue
+Administrative action
+Compliance issue
+Temporary closure
+```
+
+The business remains in the database.
+
+### Closed
+
+Closed means the business is permanently no longer operating.
+
+Future reservations/orders/billing need an explicit closure workflow.
 
 ---
 
-## API Endpoints
+# 23. Disable Operation — Never Delete Domain Data
 
-### Business Management
+Suppose:
 
-| Method | Endpoint | Description | Auth |
-|---|---|---|---|
-| `POST` | `/api/businesses` | Create new business | Owner JWT |
-| `GET` | `/api/businesses` | List owner's businesses | Owner JWT |
-| `GET` | `/api/businesses/{id}` | Get business details | Staff JWT |
-| `PUT` | `/api/businesses/{id}` | Update core business info | Owner JWT |
-| `GET` | `/api/businesses/resolve/{slug}` | Resolve business by slug | Public (tenant resolution) |
+```text
+Business A
+ └── Stays
+       ├── rooms
+       ├── reservations
+       ├── guests
+       └── invoices
+```
 
-### Profile, Address, Images
+Owner disables Stays.
 
-| Method | Endpoint | Description | Auth |
-|---|---|---|---|
-| `GET` | `/api/businesses/{id}/profile` | Get contact details | Staff JWT |
-| `PUT` | `/api/businesses/{id}/profile` | Update contact details | Owner/Manager JWT |
-| `GET` | `/api/businesses/{id}/address` | Get address | Staff JWT |
-| `PUT` | `/api/businesses/{id}/address` | Update address | Owner JWT |
-| `GET` | `/api/businesses/{id}/images` | List images | Staff JWT |
-| `POST` | `/api/businesses/{id}/images` | Upload image | Owner/Manager JWT |
-| `PUT` | `/api/businesses/{id}/images/{imageId}` | Update image metadata | Owner/Manager JWT |
-| `DELETE` | `/api/businesses/{id}/images/{imageId}` | Remove image | Owner JWT |
+Do **not** delete:
 
-### Operations & Add-ons
+```text
+rooms
+reservations
+guests
+invoices
+```
 
-| Method | Endpoint | Description | Auth |
-|---|---|---|---|
-| `POST` | `/api/businesses/{id}/operations` | Enable an operation | Owner JWT |
-| `GET` | `/api/businesses/{id}/operations` | List enabled operations | Staff JWT |
-| `DELETE` | `/api/businesses/{id}/operations/{type}` | Disable an operation | Owner JWT |
-| `POST` | `/api/businesses/{id}/operations/{type}/addons` | Enable add-on | Owner JWT |
-| `DELETE` | `/api/businesses/{id}/operations/{type}/addons/{addon}` | Disable add-on | Owner JWT |
+Instead:
 
-### Hours
+```text
+business_operations
+Stays → disabled
+```
 
-| Method | Endpoint | Description | Auth |
-|---|---|---|---|
-| `GET` | `/api/businesses/{id}/hours` | Get weekly schedule | Staff JWT |
-| `PUT` | `/api/businesses/{id}/hours` | Update weekly schedule | Owner/Manager JWT |
-| `GET` | `/api/businesses/{id}/hours/exceptions` | List exceptions | Staff JWT |
-| `POST` | `/api/businesses/{id}/hours/exceptions` | Create exception | Owner/Manager JWT |
-| `PUT` | `/api/businesses/{id}/hours/exceptions/{exId}` | Update exception | Owner/Manager JWT |
-| `DELETE` | `/api/businesses/{id}/hours/exceptions/{exId}` | Delete exception | Owner/Manager JWT |
+The Stays module then prevents new Stays activity according to its rules.
 
-### Settings
+If Stays is re-enabled:
 
-| Method | Endpoint | Description | Auth |
-|---|---|---|---|
-| `GET` | `/api/businesses/{id}/settings` | Get settings | Staff JWT |
-| `PUT` | `/api/businesses/{id}/settings` | Update settings | Owner/Manager JWT |
+```text
+Stays → enabled
+```
 
-### Tax Rates
-
-| Method | Endpoint | Description | Auth |
-|---|---|---|---|
-| `GET` | `/api/businesses/{id}/tax-rates` | List tax rates | Staff JWT |
-| `POST` | `/api/businesses/{id}/tax-rates` | Create tax rate | Owner JWT |
-| `PUT` | `/api/businesses/{id}/tax-rates/{rateId}` | Update tax rate | Owner JWT |
-| `DELETE` | `/api/businesses/{id}/tax-rates/{rateId}` | Deactivate tax rate | Owner JWT |
-| `GET` | `/api/businesses/{id}/operations/{type}/tax-rates` | Get taxes for operation | Staff JWT |
-| `PUT` | `/api/businesses/{id}/operations/{type}/tax-rates` | Assign taxes to operation | Owner JWT |
+and existing domain data remains available.
 
 ---
 
-## Key Business Rules
+# 25. Domain Events and Outbox
 
-### Business Creation
-1. Owner must be authenticated (Identity JWT)
-2. `slug` must be unique across all businesses — validate before save
-3. `legal_name` + `trading_name` both required — can be the same value
-4. On creation: publish `BusinessCreatedEvent` → Membership module auto-creates owner record
-5. On creation: auto-create `business_settings` row (1:1, always exists)
-6. On creation: auto-create 7 `business_hours` rows (one per day, default open Mon–Sun 09:00–22:00)
-7. First operation enabled → set `activated_at` on businesses
+The Business module should not directly call other modules.
 
-### Slug Rules
-- Lowercase, letters + numbers + hyphens only
-- Min 3 chars, max 100 chars — cannot start or end with hyphen
-- Reserved words blocked: `app`, `api`, `admin`, `www`, `mail`, `support`, `onenex`
-- Slug change allowed by owner only — old slug not reserved after change
+Instead:
 
-### Operation Rules
-- Same operation type cannot be enabled twice per business (UNIQUE constraint)
-- Each new operation starts `subscription_status = 'trial'`
-- Add-on requires parent operation to be enabled first
-- Add-on dependencies enforced in application layer before enabling
+```text
+Business change
+      ↓
+Database transaction
+      ↓
+Business data + Outbox record
+      ↓
+COMMIT
+      ↓
+Outbox dispatcher
+      ↓
+Event
+      ↓
+Consumer module
+```
 
-### Tax Rate Rules
-- Multiple active rates allowed per business
-- Deactivating a rate does NOT delete it — historical orders reference it
-- Rate of 0.00 valid (tax-exempt businesses)
-- Billing in operation modules reads rates through `IBusinessService.GetOperationTaxRates()`
+This prevents:
 
-### Hours Rules
-- Exception always wins over regular schedule
-- Overlapping date ranges rejected at DB level (EXCLUDE constraint)
-- `closes_next_day=true` for operations that close after midnight
+```text
+Business created successfully
+BUT
+event was lost
+```
 
 ---
 
-## Domain Events
+# 26. Important Domain Events
+
+Recommended events:
+
+```text
+BusinessCreatedEvent
+BusinessOperationEnabledEvent
+BusinessOperationDisabledEvent
+BusinessSuspendedEvent
+BusinessReactivatedEvent
+BusinessSlugChangedEvent
+BusinessTaxRateChangedEvent
+```
+
+Example:
 
 ```csharp
 public record BusinessCreatedEvent(
@@ -651,26 +1155,334 @@ public record BusinessCreatedEvent(
 
 public record BusinessOperationEnabledEvent(
     Guid BusinessId,
-    string OperationType,
-    string SubscriptionPlan
+    string OperationType
 ) : IDomainEvent;
 
 public record BusinessOperationDisabledEvent(
     Guid BusinessId,
     string OperationType
 ) : IDomainEvent;
-
-public record BusinessSuspendedEvent(
-    Guid BusinessId,
-    string Reason
-) : IDomainEvent;
 ```
 
 ---
 
-## Project Structure
+# 27. Business Creation Flow
 
+```text
+Authenticate user
+        ↓
+Validate business information
+        ↓
+Validate slug uniqueness
+        ↓
+Validate business_code uniqueness
+        ↓
+Create businesses
+        ↓
+Create business_settings
+        ↓
+Create default business hours
+        ↓
+Create Outbox BusinessCreatedEvent
+        ↓
+COMMIT
+        ↓
+Outbox publishes event
+        ↓
+Membership creates owner membership
 ```
+
+No operation needs to be automatically enabled unless product policy explicitly requires it.
+
+---
+
+# 28. Enabling an Operation
+
+Example: owner wants to enable Stays.
+
+```text
+Authorize business.operation.manage
+        ↓
+Business not closed?
+        ↓
+Subscription entitlement valid?
+        ↓
+Dependencies valid?
+        ↓
+Create/reactivate business_operations
+        ↓
+Create Outbox event
+        ↓
+COMMIT
+        ↓
+Publish BusinessOperationEnabledEvent
+        ↓
+Stays module initializes its data
+        ↓
+Stays module determines readiness
+```
+
+---
+
+# 29. Disabling an Operation
+
+```text
+Authorize business.operation.manage
+        ↓
+Check active reservations/orders/etc.
+        ↓
+Run operation-specific closure policy
+        ↓
+Mark operation disabled
+        ↓
+Create Outbox event
+        ↓
+COMMIT
+        ↓
+Operation module blocks new activity
+        ↓
+Historical data remains
+```
+
+---
+
+# 30. Authorization
+
+Do not use:
+
+```text
+Owner JWT
+Manager JWT
+Staff JWT
+```
+
+as the authorization model.
+
+Instead:
+
+```text
+Authentication
+     ↓
+Who is the user?
+     ↓
+Business context
+     ↓
+Does user have membership?
+     ↓
+RBAC permission check
+     ↓
+Execute operation
+```
+
+Example permissions:
+
+```text
+business.view
+business.update
+business.profile.update
+business.settings.update
+business.operation.manage
+business.addon.manage
+```
+
+This aligns Business with the dynamic RBAC design.
+
+---
+
+# 31. `IBusinessService`
+
+Other modules should not directly query Business tables.
+
+```csharp
+public interface IBusinessService
+{
+    Task<BusinessDto> GetBusiness(Guid businessId);
+
+    Task<bool> IsBusinessActive(Guid businessId);
+
+    Task<bool> IsOperationEnabled(
+        Guid businessId,
+        OperationType operationType);
+
+    Task<bool> IsAddonEnabled(
+        Guid businessId,
+        OperationType operationType,
+        string addonType);
+
+    Task<bool> IsBusinessOpen(
+        Guid businessId,
+        DateTime at);
+
+    Task<IReadOnlyList<TaxRateDto>>
+        GetOperationTaxRates(
+            Guid businessId,
+            OperationType operationType);
+}
+```
+
+Other modules consume contracts/application services.
+
+They do not query:
+
+```text
+businesses
+business_operations
+business_tax_rates
+```
+
+directly.
+
+---
+
+# 32. Entity Relationships
+
+```text
+users
+  │
+  └── businesses
+        ├── business_profiles                  (1:1)
+        ├── business_addresses                 (1:1 in V1)
+        ├── business_images                    (1:many)
+        ├── business_slug_history              (1:many)
+        ├── business_hours                     (1:7)
+        │      └── business_hour_intervals     (1:many)
+        ├── business_hour_exceptions           (1:many)
+        ├── business_settings                  (1:1)
+        ├── business_tax_profiles              (1:1)
+        ├── business_tax_rates                 (1:many)
+        └── business_operations                (1:many)
+               ├── business_operation_addons  (1:many)
+               └── business_operation_tax_rates
+                         │
+                         └── business_tax_rates
+```
+
+---
+
+# 33. Audit Requirements
+
+Important changes should be auditable.
+
+At minimum:
+
+```text
+Business created
+Business updated
+Business suspended
+Business closed
+Business reactivated
+
+Operation enabled
+Operation disabled
+
+Add-on enabled
+Add-on disabled
+
+Tax rate created
+Tax rate changed
+Tax rate deactivated
+
+Operation tax mapping changed
+
+Business settings changed
+
+Business slug changed
+
+Business hours changed
+```
+
+A centralized OneNex audit module is preferable if one already exists.
+
+---
+
+# 34. Branch / Location Direction
+
+`parent_business_id` can remain nullable as a future placeholder.
+
+However, V1 should not build branch behavior around it.
+
+Before Phase 2, decide whether a branch is:
+
+### Option A — Separate tenant
+
+```text
+Business A
+Business B
+```
+
+Each has separate membership/isolation.
+
+### Option B — Location under one tenant
+
+```text
+Business
+ ├── Colombo Location
+ ├── Kandy Location
+ └── Galle Location
+```
+
+The second model may be cleaner for multi-location operators because it allows:
+
+- Shared ownership
+- Consolidated reporting
+- Location-specific inventory
+- Location-specific POS
+- Location-specific staff scope
+- Location-specific hours
+- Location-specific addresses
+
+---
+
+# 35. Final V1 Table List
+
+| Table | Purpose | Status |
+|---|---|---|
+| `businesses` | Tenant/business identity | Build |
+| `business_slug_history` | Old slug history/redirect | Build |
+| `business_profiles` | Profile/contact | Build |
+| `business_addresses` | Primary physical address | Build |
+| `business_images` | Logo/cover/gallery | Build |
+| `business_operations` | Enabled operations — single source of truth | Build |
+| `business_operation_addons` | Add-ons per operation | Build |
+| `business_hours` | Weekly schedule | Build |
+| `business_hour_intervals` | Multiple intervals per day | Build |
+| `business_hour_exceptions` | Holiday/seasonal overrides | Build |
+| `business_settings` | Global display settings | Build |
+| `business_tax_profiles` | Tax registration/profile | Build |
+| `business_tax_rates` | Effective-dated tax/charge definitions | Build |
+| `business_operation_tax_rates` | Operation → tax mapping | Build |
+| `Outbox` | Reliable cross-module events | Platform |
+| `Audit` | Configuration/security history | Platform |
+
+---
+
+# 36. Final API Shape
+
+Authorization is permission-based.
+
+| Method | Endpoint | Permission |
+|---|---|---|
+| POST | `/api/businesses` | `business.create` |
+| GET | `/api/businesses` | `business.view` |
+| GET | `/api/businesses/{id}` | `business.view` + membership |
+| PUT | `/api/businesses/{id}` | `business.update` |
+| GET | `/api/businesses/resolve/{slug}` | Public tenant resolution |
+| GET/PUT | `/api/businesses/{id}/profile` | `business.profile.view/update` |
+| GET/PUT | `/api/businesses/{id}/address` | `business.address.view/update` |
+| GET/POST/PUT/DELETE | `/api/businesses/{id}/images` | `business.images.manage` |
+| GET/POST/DELETE | `/api/businesses/{id}/operations` | `business.operation.view/manage` |
+| POST/DELETE | `/api/businesses/{id}/operations/{type}/addons` | `business.addon.manage` |
+| GET/PUT | `/api/businesses/{id}/hours` | `business.hours.view/manage` |
+| GET/POST/PUT/DELETE | `/api/businesses/{id}/hours/exceptions` | `business.hours.manage` |
+| GET/PUT | `/api/businesses/{id}/settings` | `business.settings.view/update` |
+| GET/POST/PUT/DELETE | `/api/businesses/{id}/tax-rates` | `business.tax.view/manage` |
+| GET/PUT | `/api/businesses/{id}/operations/{type}/tax-rates` | `business.tax.view/manage` |
+
+---
+
+# 37. Project Structure
+
+```text
 Modules/Business/
 ├── Domain/
 │   ├── Entities/
@@ -678,11 +1490,14 @@ Modules/Business/
 │   │   ├── BusinessProfile.cs
 │   │   ├── BusinessAddress.cs
 │   │   ├── BusinessImage.cs
+│   │   ├── BusinessSlugHistory.cs
 │   │   ├── BusinessOperation.cs
 │   │   ├── BusinessOperationAddon.cs
 │   │   ├── BusinessHours.cs
+│   │   ├── BusinessHourInterval.cs
 │   │   ├── BusinessHourException.cs
 │   │   ├── BusinessSettings.cs
+│   │   ├── BusinessTaxProfile.cs
 │   │   ├── BusinessTaxRate.cs
 │   │   └── BusinessOperationTaxRate.cs
 │   ├── Events/
@@ -693,98 +1508,104 @@ Modules/Business/
 │   └── ValueObjects/
 │       ├── BusinessSlug.cs
 │       ├── OperationType.cs
-│       └── SubscriptionStatus.cs
+│       └── BusinessStatus.cs
 │
 ├── Application/
 │   └── Features/
 │       ├── Businesses/
-│       │   ├── Commands/
-│       │   │   ├── CreateBusiness/
-│       │   │   └── UpdateBusiness/
-│       │   └── Queries/
-│       │       ├── GetBusiness/
-│       │       ├── GetOwnerBusinesses/
-│       │       └── ResolveBusinessBySlug/
 │       ├── Profile/
-│       │   ├── Commands/UpdateBusinessProfile/
-│       │   └── Queries/GetBusinessProfile/
 │       ├── Address/
-│       │   ├── Commands/UpdateBusinessAddress/
-│       │   └── Queries/GetBusinessAddress/
 │       ├── Images/
-│       │   ├── Commands/
-│       │   │   ├── UploadBusinessImage/
-│       │   │   ├── UpdateBusinessImage/
-│       │   │   └── RemoveBusinessImage/
-│       │   └── Queries/GetBusinessImages/
 │       ├── Operations/
-│       │   ├── Commands/
-│       │   │   ├── EnableOperation/
-│       │   │   ├── DisableOperation/
-│       │   │   ├── EnableAddon/
-│       │   │   └── DisableAddon/
-│       │   └── Queries/GetBusinessOperations/
 │       ├── Hours/
-│       │   ├── Commands/
-│       │   │   ├── UpdateBusinessHours/
-│       │   │   ├── CreateHourException/
-│       │   │   ├── UpdateHourException/
-│       │   │   └── DeleteHourException/
-│       │   └── Queries/
-│       │       ├── GetBusinessHours/
-│       │       ├── GetHourExceptions/
-│       │       └── CheckBusinessOpen/
 │       ├── Settings/
-│       │   ├── Commands/UpdateBusinessSettings/
-│       │   └── Queries/GetBusinessSettings/
 │       └── TaxRates/
-│           ├── Commands/
-│           │   ├── CreateTaxRate/
-│           │   ├── UpdateTaxRate/
-│           │   ├── DeactivateTaxRate/
-│           │   └── AssignOperationTaxRates/
-│           └── Queries/
-│               ├── GetBusinessTaxRates/
-│               └── GetOperationTaxRates/
 │
 ├── Infrastructure/
 │   ├── Repositories/
-│   │   ├── BusinessRepository.cs
-│   │   └── BusinessOperationRepository.cs
 │   ├── EntityConfigurations/
-│   │   ├── BusinessConfiguration.cs
-│   │   ├── BusinessProfileConfiguration.cs
-│   │   ├── BusinessAddressConfiguration.cs
-│   │   ├── BusinessImageConfiguration.cs
-│   │   ├── BusinessOperationConfiguration.cs
-│   │   ├── BusinessOperationAddonConfiguration.cs
-│   │   ├── BusinessHoursConfiguration.cs
-│   │   ├── BusinessHourExceptionConfiguration.cs
-│   │   ├── BusinessSettingsConfiguration.cs
-│   │   ├── BusinessTaxRateConfiguration.cs
-│   │   └── BusinessOperationTaxRateConfiguration.cs
 │   └── BusinessDbContext.cs
 │
 └── API/
     └── Controllers/
-        ├── BusinessesController.cs
-        ├── BusinessProfileController.cs
-        ├── BusinessAddressController.cs
-        ├── BusinessImagesController.cs
-        ├── BusinessOperationsController.cs
-        ├── BusinessHoursController.cs
-        ├── BusinessSettingsController.cs
-        └── BusinessTaxRatesController.cs
 ```
 
 ---
 
-## Open Questions (Discuss with Team)
+# 38. Final Mental Model
 
-- Slug change — soft redirect for old slug or immediate 404?
-- `business_operations.config` JSONB — validate schema in application layer per operation type?
-- Image upload — direct to S3/Blob from client (presigned URL) or through API?
-- `activated_at` — set automatically on first operation enable, or owner manually confirms "go live"?
-- Branch concept (Phase 2) — branch inherits parent hours/settings or fully independent?
-- Subscription billing — Business module tracks state, but who triggers actual payment charge? Payment Service or external billing provider (Stripe)?
-- `btree_gist` extension — confirm available on target PostgreSQL hosting environment.
+```text
+BUSINESS
+= Who is the tenant?
+
+BUSINESS_OPERATION
+= What OneNex operation has this tenant enabled?
+
+SUBSCRIPTION
+= What is this tenant commercially entitled to/pay for?
+
+OPERATION MODULE
+= How does Dining/Stays/Bar/etc. actually work?
+
+MEMBERSHIP + RBAC
+= Which person is allowed to do what?
+
+TAX CONFIGURATION
+= Which charges apply, at what rate, and from when?
+
+TRANSACTION SNAPSHOT
+= What exact tax/configuration was used when the transaction happened?
+
+LOCATION / BRANCH (future)
+= Where does this business operate?
+```
+
+This separation allows the business identity to remain stable while operations, subscriptions, permissions, tax rules and domain capabilities evolve independently.
+
+---
+
+# 39. Final Architecture Summary
+
+The resulting OneNex Business architecture is:
+
+```text
+                         ┌─────────────────────┐
+                         │      BUSINESS       │
+                         │                     │
+                         │ Tenant Identity     │
+                         │ Lifecycle           │
+                         │ Locale              │
+                         │ Profile             │
+                         │ Address             │
+                         │ Settings            │
+                         └──────────┬──────────┘
+                                    │
+                   ┌────────────────┼────────────────┐
+                   │                │                │
+                   ▼                ▼                ▼
+          business_operations   Tax Config       Business Hours
+                   │
+          ┌────────┼─────────┐
+          ▼        ▼         ▼
+       Dining    Stays      Bar
+          │        │
+          ▼        ▼
+     Operation-specific
+     domain/configuration
+
+
+Subscription & Billing
+        │
+        └── Commercial entitlement
+             (separate from business_operations)
+
+Membership + RBAC
+        │
+        └── Who may access/use each capability
+
+Outbox
+        │
+        └── Reliable cross-module event delivery
+```
+
+
