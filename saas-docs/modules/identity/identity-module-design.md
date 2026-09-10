@@ -116,7 +116,7 @@ SecurityStamp         → changes when password/security info changes
 
 ### Entity 2: RefreshTokens (Custom — Identity doesn't provide)
 
-Each row is one **authentication session** (see Session Management below) — `device_info` is descriptive metadata about that session, not an identity key.
+Each row is one **authentication session** (see Session Management below) — `device_info` is descriptive metadata about that session, not an identity key. `client_id` (see Platform-Specific ClientId below) is the stable counterpart to `device_info`'s free text.
 
 ```sql
 refresh_tokens:
@@ -131,10 +131,12 @@ refresh_tokens:
   revoked_at      TIMESTAMP     NULLABLE  (null = still valid)
   revoked_reason  VARCHAR(100)  NULLABLE  (logout / rotation / suspicious / reuse_detected)
   device_info     VARCHAR(200)  NULLABLE  (browser, OS — for display)
+  client_id       VARCHAR(50)   NULLABLE  (guest-web / staff-ios / ... — stable key,
+                                            see Platform-Specific ClientId below)
   ip_address      VARCHAR(45)   NULLABLE  (IPv6 max length)
   created_at      TIMESTAMP     NOT NULL  DEFAULT NOW()
 
-INDEX: user_id, token_hash, family_id
+INDEX: user_id, token_hash, family_id, client_id
 ```
 
 **Why hashed:**
@@ -231,7 +233,8 @@ identity_security_audits:
   ip_address   VARCHAR(45)   NULLABLE
   user_agent   VARCHAR(500)  NULLABLE
   metadata     JSONB         NULLABLE  (event-specific detail, e.g. family_id
-                                         on a reuse-detection event)
+                                         on a reuse-detection event, or client_id
+                                         when the caller sent X-Client-Id)
   created_at   TIMESTAMP     NOT NULL  DEFAULT NOW()
 
 INDEX: user_id, created_at
@@ -503,6 +506,96 @@ the same opaque refresh-token value mobile sends as a JSON field, nothing
 more. Every other endpoint's authentication is unchanged: Bearer JWT,
 validated by signature/expiry/sst, exactly as documented in API
 Authentication below.
+
+---
+
+## Platform-Specific ClientId — Which OneNex App Is Calling
+
+`X-Client-Type` (above) only tells the server *how* to deliver a refresh token — web
+gets a cookie, everything else gets a JSON body. It says nothing about *which* OneNex
+front-end actually made the call, and that's a coarser answer than several concerns
+downstream of login actually need. Guest Web, Guest iOS, Guest Android, and the Staff/
+Owner web portal (plus a future staff mobile app) are distinct front-ends sharing this
+one Identity backend — a refinement of the "3 Surfaces" split already named in
+`identity-decisions.md` — and "web vs mobile" collapses all of them into two buckets:
+
+```
+- Deep links (in-app / push, see notification module) must point back into the calling
+  app, not a generic URL — a staff booking alert opens `onenexstaff://bookings/123`,
+  the same event on Guest Web opens `https://customer.onenex.com/bookings/123`. "web vs
+  mobile" can't tell those two mobile apps apart.
+- Session/device management (`refresh_tokens.device_info`, see Session Management)
+  today stores a free-text string ("Chrome on Windows") for display only — it can't be
+  queried ("show every active Staff App session") or used for policy ("force logout
+  everyone on a deprecated app build") because it isn't a stable key.
+- Audit/analytics ("which app is generating this traffic") and future forced-update
+  gating both need a stable identifier, not a parsed user-agent string.
+```
+
+### Header: `X-Client-Id` (generalizes `X-Client-Type`)
+
+```
+X-Client-Id: guest-web | guest-ios | guest-android
+           | staff-web | staff-ios | staff-android
+```
+
+Sent alongside — not instead of, for V1 — `X-Client-Type`, on the same calls that
+already send it (`/auth/login`, `/auth/refresh-token`, `/auth/logout`) plus
+`/auth/select-business`. `X-Client-Type` remains the field that governs cookie-vs-body
+delivery, so nothing in Web vs Mobile Token Delivery above changes; `X-Client-Id` is
+additive, descriptive/routing metadata layered on top. A missing or unrecognized value
+degrades to today's behavior — `X-Client-Id` is never load-bearing for auth itself, only
+for the concerns listed above.
+
+**Not for machine clients.** KDS and POS terminals already have their own identity —
+the `api_keys` row itself (Business module, see "Machine-to-Machine — API Keys" above)
+*is* their client identity. `X-Client-Id` is for human-facing front-ends only; a device
+already presenting `X-API-Key: onx_live_...` has no need for a second identifier.
+
+### Where it's stored
+
+```sql
+-- refresh_tokens (Entity 2) gains one column:
+ALTER TABLE refresh_tokens ADD
+  client_id  VARCHAR(50)  NULLABLE;   -- "guest-web", "staff-ios", ... — stable key,
+                                       -- NULL for callers that don't send it (V1 grace)
+```
+
+Distinct from `device_info` on the same row: `device_info` is free-text for a human to
+read; `client_id` is a closed, stable set a query or policy can filter on. Both are
+kept — one for display, one for logic. `identity_security_audits.metadata` (Entity 3)
+carries `client_id` too when present, so `LoginSucceeded` / `RefreshTokenRotated` rows
+are filterable by originating app the same way they're already filterable by
+`ip_address`.
+
+### Registry, not a free string
+
+`client_id` is a closed set the server validates — an unrecognized value is logged and
+treated as absent, never trusted to mean something. V1 needs no dedicated table; an
+enum is enough, the same way `ClientType.cs` already models Web/Mobile in the project
+structure:
+
+```csharp
+public enum OneNexClientId
+{
+    GuestWeb, GuestIos, GuestAndroid,
+    StaffWeb, StaffIos, StaffAndroid
+}
+```
+
+🟡 If the list grows (a white-label partner app) or needs runtime metadata (minimum
+supported version, forced-update flag), promote this to a `client_registry` table —
+no breaking change, since `client_id` is already a plain string column, not an enum
+constraint at the DB level.
+
+### Guest sessions (Customer Identity) — same concept, different token
+
+The guest JWT described in `customer-identity-design.md` (Guest Session Implementation)
+has no backing DB row to add a column to — it's a signed, self-contained token. The same
+"which app" gap applies there (a guest browsing on Guest iOS vs Guest Web still only
+gets `guest_id` + `business_id` today); if it's needed, it's an additional claim on that
+token, not a `refresh_tokens` column. Left as an open decision there rather than decided
+here, since it's a different token shape with its own owner.
 
 ---
 
@@ -1167,7 +1260,9 @@ OneNex.Identity/
 │   │   └── IdentitySecurityAudit.cs
 │   └── Enums/
 │       ├── UserStatus.cs
-│       └── ClientType.cs             ← Web / Mobile — from X-Client-Type
+│       ├── ClientType.cs             ← Web / Mobile — from X-Client-Type
+│       └── OneNexClientId.cs         ← guest-web / staff-ios / ... — from X-Client-Id
+│                                        (see Platform-Specific ClientId)
 │
 ├── Application/
 │   ├── Features/
@@ -1421,3 +1516,7 @@ Phase 3: Public API program for third-party developers
   Machine-to-Machine section's forward-reference note) — open item is
   simply *when* that module's doc defines the table, not where it lives.
 - Should `/auth/me/memberships` be cached client-side with a short TTL to avoid a round trip on every Owner Portal visit, given membership/role changes are infrequent?
+- `X-Client-Id` (see Platform-Specific ClientId): V1 stores it opportunistically
+  (nullable, degrades gracefully if absent) — open item is whether/when it becomes
+  required for new client builds, and whether the guest JWT (Customer Identity module)
+  gets an equivalent claim on the same timeline or later.
