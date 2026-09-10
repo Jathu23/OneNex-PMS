@@ -128,8 +128,8 @@ This is the **tenant-scoped customer record** — the CRM equivalent of `staff_m
 | `business_id` | uuid | NO | FK `businesses.id` | Owning business (tenant) |
 | `user_id` | uuid | YES | FK `users.id` | Linked global identity; NULL = guest — the one true source of link state |
 | `full_name` | varchar(150) | NO | — | Captured/display name |
-| `phone` | varchar(20) | YES | E.164, indexed (not unique) | Contact/matching signal, if captured — never a claim of identity (see below) |
-| `email` | varchar(254) | YES | indexed (not unique) | Same caveat as phone |
+| `phone` | varchar(20) | YES | E.164, UNIQUE per business | Contact number — one profile per phone within a business; see below for the trade-off this accepts |
+| `email` | varchar(254) | YES | indexed (not unique) | Contact/matching signal, if captured — never a claim of identity, unlike phone (see below) |
 | `source` | varchar(20) | NO | CHECK `walk_in/self_registered/imported` | How this profile originated |
 | `status` | varchar(10) | NO | `GENERATED ALWAYS AS (...) STORED` | `guest`/`linked` — computed from `user_id`, never written directly (see below) |
 | `first_branch_id` | uuid | YES | FK `branches.id` | Branch where first captured (analytics only) |
@@ -162,20 +162,28 @@ one per business they've interacted with:
    Grand Hotel          Beach Resort
 ```
 
-`user_id` is safe to make a hard uniqueness key *per business*
-(`UNIQUE(business_id, user_id)` below) because Identity has already
-verified it — two rows can't both claim to be the same verified account
-at the same business. `phone`/`email` do **not** get the same treatment,
-and this is deliberate, not an oversight: they are *what the business was
-told*, not a verified identity. Two different real people can legitimately
-share a phone (family members, a front-desk typo, a number reassigned
-after the original owner released it — see the phone-recycling open
-question, §18). Forcing them into one row via a hard `UNIQUE(business_id,
-phone)` constraint would silently merge two different people's order
-history the moment that collision happens. So `phone`/`email` are indexed
-for fast matching — used to *suggest* "is this the same customer?" — but
-never enforced as a database-level identity guarantee. See §6.1's Lookup
-flow for how a phone match with more than one candidate is handled.
+`user_id` is a hard uniqueness key *per business* (`UNIQUE(business_id,
+user_id)` below) because Identity has already verified it — two rows
+can't both claim to be the same verified account at the same business.
+`phone` now gets the same treatment: `UNIQUE(business_id, phone)`. This
+is a deliberate simplification, not a claim that a phone number is a
+verified identity the way `user_id` is — it is *what the business was
+told*, same as before. The trade-off it accepts: two different real
+people can legitimately share a phone (family members, a front-desk
+typo, a number reassigned after the original owner released it), and
+with a hard constraint they can no longer both hold independent profiles
+at the same business — the second person's capture resolves to the
+first person's existing row instead of creating a new one. This is
+accepted for V1 in exchange for a deterministic find-or-create at
+capture time, with no ambiguous-match flow to build or for staff to
+navigate (see §6.1). Revisit if it causes real complaints — tracked as
+an open question, §18.
+
+`email` does **not** get the same treatment and stays a soft matching
+signal only — indexed for fast lookup, never enforced as a
+database-level identity guarantee, because nothing about email needs
+the same walk-in determinism phone does (email is rarely what a
+front-desk capture keys off).
 
 ### Constraints
 
@@ -184,10 +192,12 @@ UNIQUE (business_id, user_id)                         -- one profile per busines
                                                         -- safe because Identity already verified this value
                                                         -- (partial: WHERE user_id IS NOT NULL)
 
-INDEX  (business_id, phone)                            -- matching signal for lookup/capture — NOT unique,
-                                                        -- see "Identity Model" above for why
+UNIQUE (business_id, phone)                            -- one profile per business per phone number —
+                                                        -- see "Identity Model" above for the accepted trade-off
+                                                        -- (partial: WHERE phone IS NOT NULL)
 
-INDEX  (business_id, email)                            -- same caveat as phone — NOT unique
+INDEX  (business_id, email)                            -- matching signal for lookup — NOT unique,
+                                                        -- see "Identity Model" above for why
 
 INDEX (user_id)                                        -- "which businesses know me" lookups
 
@@ -203,9 +213,11 @@ business — a person can be a guest of Grand Hotel and, separately, a guest
 of Bella Salon, and those are two independent rows, both `UNIQUE(business_id,
 user_id)`-satisfying because `business_id` differs. This mirrors
 `staff_memberships`' `UNIQUE(user_id, business_id)` — the relationship is
-always scoped to one business, never global. (Phone/email are no longer
-part of this uniqueness argument at all, per the section above — they're
-matching signals, scoped or not.)
+always scoped to one business, never global. `UNIQUE(business_id, phone)`
+follows the identical shape — the same phone number is fine at two
+different businesses, never enforced across them. (Email is the only
+field left out of this uniqueness argument — it stays a matching signal,
+scoped or not, per the section above.)
 
 ---
 
@@ -296,15 +308,22 @@ CREATE UNIQUE INDEX uq_business_customer_user
     ON business_customers(business_id, user_id)
     WHERE user_id IS NOT NULL;
 
--- Matching signals, NOT identity guarantees — deliberately not UNIQUE.
--- Two different real people can share a phone/email (family members, a
--- front-desk typo, a recycled number); forcing them into one row would
--- silently merge two people's history. See "Identity Model" (§4.1) and
--- the Lookup flow (§6.1) for how a multi-match lookup is resolved.
-CREATE INDEX ix_business_customer_phone
+-- Hard identity guarantee, same shape as uq_business_customer_user: one
+-- profile per business per phone number. Accepted trade-off: two
+-- different real people sharing a phone (family members, a recycled
+-- number) can no longer hold independent profiles at the same business —
+-- see "Identity Model" (§4.1) for why this was chosen over the ambiguous
+-- multi-match flow it replaces.
+CREATE UNIQUE INDEX uq_business_customer_phone
     ON business_customers(business_id, phone)
     WHERE phone IS NOT NULL;
 
+-- Matching signal, NOT an identity guarantee — deliberately not UNIQUE.
+-- Two different real people can share an email far less often than a
+-- phone in practice, but the same risk applies in principle; kept soft
+-- since nothing about email needs walk-in determinism. See "Identity
+-- Model" (§4.1) and the Lookup flow (§6.2) for how a multi-match lookup
+-- is resolved.
 CREATE INDEX ix_business_customer_email
     ON business_customers(business_id, email)
     WHERE email IS NOT NULL;
@@ -349,22 +368,19 @@ POST /api/businesses/{grandHotelId}/customers/lookup
 Server:
   1. Search business_customers WHERE business_id = grandHotel
        AND phone = "+94771234567"
-     (phone is a matching signal, not a unique key — see §4.1's Identity
-     Model — so this can return zero, one, or more than one row)
-  2a. Exactly one match → return it (guest or linked — staff doesn't
-      need to know or care which; the order attaches to this profile
-      either way). This is the overwhelmingly common case.
-  2b. Zero matches → INSERT business_customers
+     (phone is now unique per business — see §4.1's Identity Model — so
+     this returns at most one row; no ambiguous-match case to handle)
+  2a. Match found → return it (guest or linked — staff doesn't need to
+      know or care which; the order attaches to this profile either
+      way). If the phone happens to be shared by a different real person
+      (family members, a recycled number), this is where that trade-off
+      lands: the existing profile is what's returned, not a new one —
+      see the accepted trade-off in §4.1 and the open question in §18.
+  2b. No match → INSERT business_customers
         (business_id, phone, full_name, source='walk_in',
          user_id=NULL,   -- status computes to 'guest' automatically
          created_by_user_id=<staff user>, first_branch_id=<branch>)
       → CustomerCapturedEvent
-  2c. More than one match (rare — e.g. a shared family phone already has
-      two separate guest profiles at this business) → return all matches;
-      front desk picks the right one, or explicitly starts a new profile
-      ("not one of these") rather than the system silently guessing.
-      V1 does not attempt to auto-merge or auto-disambiguate these —
-      same posture as the "manual merge tooling" open question (§18).
 
 Order/booking flow then references business_customer_id, not user_id.
 Kamal never sees onenex.ai. No account was created. No email/password
@@ -425,12 +441,15 @@ Server:
           AND (phone = Priya's verified phone OR email = Priya's
                verified email)
           AND status = 'guest'
+        (phone alone can match at most one row now — §4.1 — so any
+        ambiguity here can only come from email, or from phone and email
+        independently matching two different existing rows)
         → found EXACTLY ONE guest row (maybe a friend gave the salon her
           number once)?
             → link it in place (same rules as §6.1's claim step),
               linked_via = 'auto_on_interaction'
-        → found MORE THAN ONE guest row (e.g. her number is also on file
-          for a family member's separate guest profile)?
+        → found MORE THAN ONE guest row (e.g. her phone matches one
+          guest row while her email separately matches a different one)?
             → do NOT guess which one is really her — fall through to
               "not found" below and create a fresh linked profile.
               The ambiguous guest row(s) stay unlinked, discoverable later
@@ -469,7 +488,7 @@ Note the `auto_on_interaction` linking path in 6.2 (2a-linked) is the one delibe
 ### Never
 
 - Never link two `business_customers` rows to the same `user_id` within one business (enforced by `uq_business_customer_user`, a hard constraint because Identity has already verified that value) — if a duplicate is discovered (e.g. two guest rows with different phone numbers that turn out to be the same person), that is a manual merge/support operation, not an automatic one.
-- Never treat matching `phone`/`email` as proof two guest rows are the same person, and never force them into one row via a database uniqueness constraint — phone/email are indexed matching signals *precisely because* they are not reliable identity (see §4.1's Identity Model). V1 does not attempt automatic fuzzy duplicate-guest detection or auto-merge beyond an exact phone/email match surfaced for a human to resolve.
+- Never treat a matching `email` as proof two guest rows are the same person, and never force them into one row via a database uniqueness constraint — email stays an indexed matching signal *precisely because* it is not reliable identity (see §4.1's Identity Model). `phone` is the one exception, by deliberate choice: it is hard-unique per business, so a phone match *is* the same row by construction, accepting the family-sharing/recycling trade-off documented in §4.1 rather than resolving it via a candidate-picker flow. V1 does not attempt automatic fuzzy duplicate-guest detection or auto-merge beyond an exact email match surfaced for a human to resolve.
 - Never treat a `business_customers.phone`/`email` as verified just because it is stored — it is only ever "what the business was told."
 - Never let the Dining/Stays/etc. modules query `business_customers` directly — they hold a `business_customer_id` FK and go through `ICustomerService` for anything beyond that ID.
 - Never expose another business's customer list through `/api/customers/me/*` — those endpoints are scoped to "businesses that have a profile linked to me," never a directory of other people.
@@ -495,7 +514,7 @@ Business B's customer relationship  ≠  Business A's customer relationship
 **Businesses cannot see each other's customers.** There is no API, no report, and no admin screen in this design that lets Business A list, search, export, or match against Business B's `business_customers` rows. This is enforced structurally, not just by policy:
 
 ```text
-ix_business_customer_phone   → INDEX  (business_id, phone)
+uq_business_customer_phone   → UNIQUE (business_id, phone)
 ix_business_customer_email   → INDEX  (business_id, email)
 uq_business_customer_user    → UNIQUE (business_id, user_id)
 ```
@@ -578,9 +597,9 @@ Same posture as Membership and Business modules: application-layer scoping (ever
 public interface ICustomerService
 {
     // Staff/POS-facing — capture or find a customer within one business.
-    // Phone/email are matching signals, not unique keys (§4.1's Identity
-    // Model), so this is a tri-state outcome, never a silent guess:
-    Task<CustomerLookupResult> LookupOrCreateAsync(
+    // `phone` is UNIQUE per business (§4.1's Identity Model), so this is
+    // a deterministic find-or-create — never an ambiguous match:
+    Task<BusinessCustomerDto> LookupOrCreateAsync(
         Guid businessId,
         string? phone,
         string? email,
@@ -618,19 +637,9 @@ public interface ICustomerService
         Guid userId,
         CancellationToken cancellationToken = default);
 }
-
-public sealed class CustomerLookupResult
-{
-    // Exactly one of these two is ever set:
-    public BusinessCustomerDto? Resolved { get; init; }
-        // Zero matches (a fresh profile was created) or exactly one match.
-    public IReadOnlyList<BusinessCustomerDto>? Candidates { get; init; }
-        // More than one match. The caller (staff/POS UI) must disambiguate
-        // or explicitly request a new profile — this method never guesses.
-}
 ```
 
-The staff-facing `/customers/lookup` endpoint (§11) is the one place `LookupOrCreateAsync`'s ambiguous case is meant to surface — a human is present to pick the right candidate or say "none of these." Once a `business_customer_id` has been resolved that way, order/booking creation in Dining, Stays, etc. calls `GetAsync` with that known ID — they never call `LookupOrCreateAsync` themselves, never see `user_id`, linking state, or a candidate list. Whether a customer was a guest, linked, or ambiguous at capture time is a CRM/front-desk concern, invisible to an order.
+The staff-facing `/customers/lookup` endpoint (§11) calls `LookupOrCreateAsync` and always gets back exactly one profile — found or freshly created, never a candidate list to disambiguate, since `phone` being unique per business (§4.1) makes the match deterministic. Order/booking creation in Dining, Stays, etc. then calls `GetAsync` with that known `business_customer_id` — they never call `LookupOrCreateAsync` themselves and never see `user_id` or linking state. Whether a customer was a guest or linked at capture time is a CRM/front-desk concern, invisible to an order.
 
 ---
 
@@ -667,7 +676,7 @@ CustomerProfileUpdatedEvent  → staff edited name/notes/tags
 
 | Method | Endpoint | Auth | Purpose |
 |---|---|---|---|
-| POST | `/api/businesses/{businessId}/customers/lookup` | JWT_2, `crm:customers:create` | Staff/POS: find-or-create by phone/email (Scenario 1 capture). Returns either a resolved profile or a short list of ambiguous candidates for staff to pick from (see `CustomerLookupResult`, §9) — never a silent guess. |
+| POST | `/api/businesses/{businessId}/customers/lookup` | JWT_2, `crm:customers:create` | Staff/POS: find-or-create by phone/email (Scenario 1 capture). Phone is unique per business (§4.1), so this always returns a single deterministic profile — found or freshly created, never a candidate list (§9). |
 | GET | `/api/businesses/{businessId}/customers` | JWT_2, `crm:customers:view` | Staff-facing customer list/search |
 | GET | `/api/businesses/{businessId}/customers/{id}` | JWT_2, `crm:customers:view` | Profile detail |
 | PUT | `/api/businesses/{businessId}/customers/{id}` | JWT_2, `crm:customers:update` | Edit name/notes/tags/opt-in |
@@ -714,7 +723,7 @@ users (Identity)
         └── business_customer_merge_log  (1:many, append-only audit)
 
 businesses
-  └── business_customers            0..N per business, UNIQUE per phone/email
+  └── business_customers            0..N per business, UNIQUE per phone; email stays a non-unique matching signal
 
 Dining/Stays/etc. orders, bookings, folios
   └── business_customer_id FK       (never user_id directly)
@@ -729,7 +738,7 @@ Dining/Stays/etc. orders, bookings, folios
 | **Identity** | Source of the global `user_id` and the *verified* phone/email that linking depends on. This module never writes to Identity tables and never verifies contact info itself — it only reads verification state through `IIdentityService`. |
 | **Business** | Source of `business_id` / `branch_id`. `first_branch_id` is informational only, resolved through `IBusinessService`, never joined directly. |
 | **Membership** | Structurally parallel (`business_customers` mirrors `staff_memberships`) but functionally unrelated — a customer profile carries no `business_role`, no operation access, no permissions. A person can simultaneously be `staff_memberships` (owner of Business A) and `business_customers` (a guest customer of Business B) — these are two independent rows in two independent tables, tied together only by the same `users.id`. |
-| **Dining / Stays / other operation modules** | Consume `ICustomerService.GetAsync` with a `business_customer_id` already resolved by the staff-facing lookup step (§9) — they don't call `LookupOrCreateAsync` themselves and never handle its ambiguous-candidate case. They store `business_customer_id`, never `user_id`, so that guest→linked transitions never require rewriting order history. |
+| **Dining / Stays / other operation modules** | Consume `ICustomerService.GetAsync` with a `business_customer_id` already resolved by the staff-facing lookup step (§9) — they don't call `LookupOrCreateAsync` themselves. They store `business_customer_id`, never `user_id`, so that guest→linked transitions never require rewriting order history. |
 | **Notification** | Consumes `CustomerCapturedEvent` / `CustomerAccountLinkedEvent` if/when marketing or transactional messaging is layered on top (opt-in gated by `marketing_opt_in`). |
 
 ---
@@ -783,7 +792,7 @@ Modules/Crm/
 | `business_customer_merge_log` | Build |
 | `customer_tags` | Build (simple free-text label only) |
 | Loyalty points / tiers | Out of scope — V1 has `marketing_opt_in` only, no points ledger |
-| Automatic duplicate-guest detection / auto-merge | Out of scope — exact phone/email matches are surfaced (lookup returns multiple candidates; ambiguous auto-link falls back to a new profile), never silently merged. Fuzzy matching (name/typo) is also out of scope. |
+| Automatic duplicate-guest detection / auto-merge | Out of scope — `phone` matches resolve deterministically (unique per business, §4.1); exact `email` matches are surfaced only through the claim/auto-link flows (§6.1, §6.2), never silently merged. Fuzzy matching (name/typo) is also out of scope. |
 
 ---
 
@@ -793,7 +802,7 @@ Modules/Crm/
 |---|---|
 | Walk-in captured with phone only | `business_customers` row created, `status` reads `guest` (computed), `user_id=NULL` |
 | Same phone captured twice at same business, one existing row matches | Second call returns the existing row, no duplicate created |
-| Two different guest profiles at the same business share a phone (e.g. family members) | Both rows coexist — no `UNIQUE` violation; a lookup by that phone returns both as candidates rather than erroring or silently merging |
+| A second, different real person is captured with a phone already on file at that business (e.g. family members sharing a line) | Rejected as a new row by `uq_business_customer_phone`; the lookup resolves to the existing profile instead of creating a second one — the accepted trade-off, see §4.1 |
 | Linking `user_id` to a `business_customers` row that already has a different `user_id` linked at that business | Rejected by `uq_business_customer_user` |
 | Same phone captured at two different businesses | Two independent rows, no conflict |
 | Customer registers on OneNex, phone matches an existing guest row at Business A | Row appears in `GET /customers/me/claimable` |
@@ -802,7 +811,7 @@ Modules/Crm/
 | Two concurrent claim requests for the same guest profile | Only one succeeds; the other gets a conflict/already-linked response |
 | Platform booking by an already-registered customer, no prior guest row | New `business_customers` row created directly as `linked`, `source=self_registered` |
 | Platform booking by an already-registered customer, exactly one matching guest row exists | Existing row is linked in place (`linked_via=auto_on_interaction`), not duplicated |
-| Platform booking by an already-registered customer, phone matches TWO existing guest rows at that business | Neither is auto-linked; a fresh `linked` profile is created instead, both guest rows remain unlinked and claimable later |
+| Platform booking by an already-registered customer, phone matches one existing guest row while email independently matches a different guest row at that business | Neither is auto-linked (ambiguous); a fresh `linked` profile is created instead, both guest rows remain unlinked and claimable later |
 | Staff searches customers by partial name/phone | Returns matches scoped to that business only |
 | Attempt to create a profile with neither phone nor email | Rejected (`chk_has_contact`) |
 | Attempt to directly `UPDATE ... SET status = 'linked'` without setting `user_id` | Rejected by Postgres — `status` is a generated column and cannot be written to |
@@ -815,7 +824,7 @@ Modules/Crm/
 - Should `GetClaimableProfiles` be surfaced proactively (a notification/banner: "you have visit history to claim") or only on-demand when the customer opens a "link my history" screen? V1 leans on-demand to avoid a background matching job.
 - Loyalty points/tiers: separate module (`Loyalty`) once needed, or absorbed into this one? Leaning separate module, consuming `business_customer_id` as its key, same pattern as operation modules.
 - Should a business be able to *merge two guest profiles it owns* (e.g. staff realizes "John S." and "J. Silva" are the same person, both unlinked)? Manual merge tooling is not in V1 — flag as a support/ops task for now.
-- Phone number recycling (a number is reassigned to a new person years later) is not handled — a stale guest row could theoretically be claimed by the wrong new owner of an old number. Low-probability, not addressed in V1; revisit if it becomes a real complaint.
+- `phone` is now `UNIQUE(business_id, phone)` (§4.1) — accepted trade-off: two different real people sharing one phone at the same business (family members, or a number recycled to a new owner years later) can no longer hold independent profiles; the second person's capture, or a stale claim attempt, silently resolves to the first person's existing row. Low-probability, accepted for V1 in exchange for a deterministic capture flow with no candidate-picker UI to build; revisit (e.g. a manual "this is actually a different person, split the profile" action) if it becomes a real complaint.
 - Does `marketing_opt_in` need to be per-channel (email vs SMS) from V1, or is a single flag sufficient until a real campaign feature exists?
 - Should `business_customers.full_name` sync from Identity's `users.Name` after linking (keeping the two in sync), or stay independently editable per business (a business might want to record "Mr. Silva" while the platform-wide name is "K. Silva")? Leaning independently editable — same reasoning as staff display names vs account names elsewhere in the product.
 - Cross-business sharing (§8.4): should OneNex ever offer an opt-in "franchise/loyalty network" feature letting commonly-owned or partnered businesses share customer profiles? Needs explicit product + legal sign-off (consent model, ToS changes) before design — not assumed anywhere else in this document.
