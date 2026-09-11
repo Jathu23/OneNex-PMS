@@ -104,15 +104,17 @@ Room status management — minimum viable for any hotel.
 - Status update: housekeeper marks room status (simple web or mobile input)
 - Supervisor inspection: approve/reject → room moves to INS status
 
-### C5 — Guest Profile (Basic)
-Essential guest data — enough for V1 operations.
+### C5 — Guest Data for Stays
+Stays-specific guest data. Core guest identity lives in Guest Module (cross-operation).
 
-- Name, contact (email, phone), nationality, ID number
-- Stay history (auto-built from bookings)
-- Basic preferences: bed type, floor, smoking/non-smoking
-- VIP flag (manual) and Blacklist flag (with reason)
-- Special occasions: birthday, anniversary (for front desk awareness)
-- One unified guest profile across all Operations (Hotel + Restaurant + Spa = same guest)
+- Room preferences: bed type, floor, smoking, room location (StaysGuestPreference)
+- Legal document capture: Passport (foreign) / NIC (local) — Sri Lanka law requirement
+- TDL flag: derived from document issuing country (foreign guest = TDL applies)
+- Stay history: auto-queried from bookings (no separate table)
+- Check-in screen: aggregates guest profile + preferences + documents + occasions
+
+Note: VIP, blacklist, occasions, notes → Guest Module (saas-docs/modules/guest/).
+      One unified guest_profile per business, shared across all operations.
 
 ### C6 — Guest Folio & Billing
 Financial heart of Stays. Every charge flows through here.
