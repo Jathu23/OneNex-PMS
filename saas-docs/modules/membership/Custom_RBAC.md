@@ -1528,7 +1528,7 @@ grandhotel.onenex.com
 
 ### JWT
 
-This is the **business-scoped session token** (JWT_2), minted by Identity after Abi selected Grand Hotel in the Owner Portal — see the Identity module's "Business Context & Portal Access" flow. The original login token (JWT_1) never carries a business_id.
+This is the same JWT Identity always issues — there is exactly one JWT structure, never a separate token per state (see `identity-module-design.md` → "JWT Design") — now carrying `business_id` after Abi selected Grand Hotel in the Owner Portal, reissued in place via the Identity module's "Business Context & Portal Access" flow. Before that selection, the token has no `business_id` claim.
 
 ```text
 sub = U001

@@ -390,7 +390,7 @@ was required.
 Six months later, Kamal registers on OneNex directly (unrelated reason — maybe a friend told him about it) and verifies his phone number through Identity's normal flow. He now has a global `users` row with `PhoneNumberConfirmed = true` for `+94771234567`.
 
 ```text
-GET /api/customers/me/claimable   (JWT_1)
+GET /api/customers/me/claimable   (JWT, no business_id)
 
 Server:
   SELECT business_customers
@@ -429,7 +429,7 @@ and has never visited any business.
 
 She browses onenex.ai, finds "Bella Salon", and books an appointment.
 
-POST /api/businesses/{bellaSalonId}/customers/attach   (JWT_1)
+POST /api/businesses/{bellaSalonId}/customers/attach   (JWT, no business_id)
   (called internally by the booking flow, not by Priya directly)
 
 Server:
@@ -668,6 +668,12 @@ CustomerCapturedEvent        → analytics; Notification may send a
 CustomerAccountLinkedEvent   → invalidate any cached guest/linked state;
                                 audit
 CustomerProfileUpdatedEvent  → staff edited name/notes/tags
+GuestDeviceClaimedEvent       → introduced by guest-ordering-flow.md §12
+                                (anonymous QR ordering's device-based
+                                account-linking path) — consumed by the
+                                ordering/Dining module to link its own
+                                `orders` rows; this module never writes
+                                `orders` directly
 ```
 
 ---
@@ -676,15 +682,15 @@ CustomerProfileUpdatedEvent  → staff edited name/notes/tags
 
 | Method | Endpoint | Auth | Purpose |
 |---|---|---|---|
-| POST | `/api/businesses/{businessId}/customers/lookup` | JWT_2, `crm:customers:create` | Staff/POS: find-or-create by phone/email (Scenario 1 capture). Phone is unique per business (§4.1), so this always returns a single deterministic profile — found or freshly created, never a candidate list (§9). |
-| GET | `/api/businesses/{businessId}/customers` | JWT_2, `crm:customers:view` | Staff-facing customer list/search |
-| GET | `/api/businesses/{businessId}/customers/{id}` | JWT_2, `crm:customers:view` | Profile detail |
-| PUT | `/api/businesses/{businessId}/customers/{id}` | JWT_2, `crm:customers:update` | Edit name/notes/tags/opt-in |
-| DELETE | `/api/businesses/{businessId}/customers/{id}` | JWT_2, `crm:customers:delete` | Soft-delete (GDPR-style; never hard-delete a row referenced by order history) |
-| POST | `/api/businesses/{businessId}/customers/attach` | JWT_1 (platform flow) | Internal call from booking/order flow (Scenario 2) — not staff-facing |
-| GET | `/api/customers/me/claimable` | JWT_1 | Customer: list unlinked profiles matching my verified contact info |
-| POST | `/api/customers/me/claim/{businessCustomerId}` | JWT_1 | Customer: link a guest profile to myself |
-| GET | `/api/customers/me/businesses` | JWT_1 | Customer: "where have I got history" — powers a OneNex-wide order/booking history screen |
+| POST | `/api/businesses/{businessId}/customers/lookup` | JWT (business_id), `crm:customers:create` | Staff/POS: find-or-create by phone/email (Scenario 1 capture). Phone is unique per business (§4.1), so this always returns a single deterministic profile — found or freshly created, never a candidate list (§9). |
+| GET | `/api/businesses/{businessId}/customers` | JWT (business_id), `crm:customers:view` | Staff-facing customer list/search |
+| GET | `/api/businesses/{businessId}/customers/{id}` | JWT (business_id), `crm:customers:view` | Profile detail |
+| PUT | `/api/businesses/{businessId}/customers/{id}` | JWT (business_id), `crm:customers:update` | Edit name/notes/tags/opt-in |
+| DELETE | `/api/businesses/{businessId}/customers/{id}` | JWT (business_id), `crm:customers:delete` | Soft-delete (GDPR-style; never hard-delete a row referenced by order history) |
+| POST | `/api/businesses/{businessId}/customers/attach` | JWT (no business_id, platform flow) | Internal call from booking/order flow (Scenario 2) — not staff-facing |
+| GET | `/api/customers/me/claimable` | JWT (no business_id) | Customer: list unlinked profiles matching my verified contact info |
+| POST | `/api/customers/me/claim/{businessCustomerId}` | JWT (no business_id) | Customer: link a guest profile to myself |
+| GET | `/api/customers/me/businesses` | JWT (no business_id) | Customer: "where have I got history" — powers a OneNex-wide order/booking history screen |
 
 `crm:customers:*` permission codes already exist in the Membership module's seeded permission catalog (`Custom_RBAC.md` §17) — this module consumes them, it does not define its own permission scheme.
 
@@ -779,7 +785,7 @@ Modules/Crm/
 └── API/
     └── Controllers/
         ├── CustomersController.cs          (business-scoped, staff-facing)
-        └── MyCustomerProfilesController.cs (JWT_1, customer-facing)
+        └── MyCustomerProfilesController.cs (JWT, no business_id — customer-facing)
 ```
 
 ---

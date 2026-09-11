@@ -57,24 +57,30 @@ Never directly. Never across database tables.
 
 ---
 
-## JWT Flow — 3 Phases
+## JWT Flow — 2 Phases, One Token
+
+There is exactly **one** JWT structure (see `identity-module-design.md` →
+"JWT Design") — it is reissued in place as its context changes, never
+replaced by a different token type. Permissions are deliberately **not**
+a JWT claim (see `Custom_RBAC.md` §"JWT permissions: Not included") —
+they change independently of login/business-selection and would go stale
+the moment a role changed mid-session, so they're loaded fresh per
+request instead.
 
 ```
 PHASE 1: Login (Identity Module)
 → Verify email + password
-→ JWT_1: { user_id, email }   ← no business context yet
+→ JWT issued: { user_id, ... }   ← no business_id yet
 
-PHASE 2: Business context (Business Module)
+PHASE 2: Business context (Business Module / Identity's /auth/select-business)
 → Subdomain slug → business_id  (staff at {slug}.onenex.com)
    OR owner selects from list   (owner at app.onenex.com)
-→ JWT_2: { user_id, business_id }
+→ Same JWT reissued in place with business_id populated
 
-PHASE 3: Permissions loaded (Membership Module)
-→ Load role + permissions for this user in this business
-→ JWT_3: { user_id, business_id, role, permissions[] }
-
-ALL API CALLS USE JWT_3.
+ALL BUSINESS-SCOPED API CALLS USE THE JWT'S business_id CLAIM.
 Every DB query: WHERE business_id = jwt.business_id
+Role + permissions for (user_id, business_id) are loaded per request
+(Membership module, cached — see Custom_RBAC.md), not carried in the token.
 Cross-tenant data: impossible by design.
 ```
 
@@ -86,7 +92,7 @@ Cross-tenant data: impossible by design.
 Owner sign up + login         → Identity Module
 Create first business         → Business Module
 Enable operation (dining...)  → Business Module
-                                → JWT_2 + JWT_3 issued here
+                                → JWT reissued with business_id here
 Operation setup (tables/menu) → Dining Module (or relevant operation)
 Invite staff + set roles      → Membership Module
 Owner dashboard               → Business Module
@@ -237,7 +243,10 @@ staff_memberships:
 ├── PIN setup for terminal / POS login
 ├── PIN validation (terminal login flow)
 ├── Revoke / deactivate access
-├── JWT Phase 3 issue { user_id, business_id, role, permissions[] }
+├── Role + permission lookup for (user_id, business_id) — NOT a JWT claim;
+│     loaded fresh per request (cached) so a role change never waits on
+│     token expiry to take effect. See `Custom_RBAC.md` §"JWT
+│     permissions: Not included" and this doc's "JWT Flow" section above.
 └── RBAC permission checks → exposed via IRbacService in Shared.Contracts
 ```
 
@@ -379,11 +388,19 @@ Table Reservation
   ├── Status: confirmed / arrived / no-show / cancelled
   └── Walk-in vs reservation floor view
 
-QR Self-Ordering
+QR Self-Ordering  — full design: ../modules/crm/guest-ordering-flow.md
   ├── Generate QR code per table
-  ├── Customer scans → views menu on phone
-  ├── Customer places order → goes directly to KDS
-  └── Customer pays from phone → calls IPaymentService
+  ├── Customer scans → views menu on phone (fully anonymous, D2)
+  ├── Customer places order → no name/phone/email captured at all;
+  │     order recorded in full, no business_customers row created
+  ├── Guest checks order status via a per-order Order Access Token
+  │     (not the Identity JWT, not a business_customers-linked token)
+  ├── Order → goes directly to KDS
+  ├── Customer pays from phone → calls IPaymentService
+  └── Optional: guest can opt into a receipt (captures contact info,
+        creates a normal business_customers row) or later auto-link
+        past orders to an account via a device-correlation ID — neither
+        is required to order; see guest-ordering-flow.md §10/§12
 
 Takeaway
   ├── Counter orders (customer name, pickup number)
@@ -545,23 +562,38 @@ Retail Module
 
 ---
 
-### Customer CRM (Phase 2)
+### Customer CRM
+
+> Superseded by `../modules/crm/customer-module-design.md` — this section
+> originally described a cross-business, organization-level profile,
+> which was explicitly **rejected** by `identity-decisions.md` D1: the
+> account is global (one login via Identity's `users` table), but the
+> *data* is business-scoped, not owner/org-scoped — "a customer who is a
+> guest of Grand Hotel is not automatically visible to City Apartments
+> just because they share an owner" (`customer-module-design.md` §8.4).
+> Kept here only so this map still shows where the module sits; for the
+> actual design, table shape, and API, see the CRM module doc directly.
 
 ```
-Responsibility: Single guest/customer profile across all businesses.
+Responsibility: Business-scoped customer profile, one row per
+                (business, person) — NOT a cross-business profile.
 
 Owns:
-  customer_profiles: user_id, organization-level data,
-                     preferences, visit history, loyalty points
+  business_customers: business_id, user_id (nullable — NULL = guest),
+                       full_name, phone, email, marketing_opt_in, ...
+  (full shape: customer-module-design.md §4, or the quick reference at
+  customer-db-api-reference.md §1)
 
 Features:
-  ├── Cross-business guest recognition
-  ├── Visit history (stayed at hotel 3x, visited restaurant 8x)
-  ├── Preferences (room type, dietary, special occasions)
-  └── VIP / blacklist flags
+  ├── Guest capture (walk-in, no account) and self-registered capture
+  ├── Guest → account claim flow (verified phone/email match only)
+  ├── Per-business marketing consent, tags, notes
+  └── NO cross-business recognition by default (§8.2/§8.4) — a future
+      opt-in "franchise/loyalty network" is flagged, not built
 
-V1: Basic profile stored in Identity module
-Phase 2: Extract to full CRM module
+Owned by: its own CRM module — never "stored in Identity" (D5: Identity
+only owns the global `users`/`AspNetUsers` row; business_customers is a
+separate module's table from day one, not a Phase 2 extraction target).
 ```
 
 ---
@@ -666,7 +698,12 @@ Phase 3+:
 
 ## Open Questions (Review Before Finalizing)
 
-- JWT Phase 2 + 3 — one combined API call or two separate calls?
+- ~~JWT Phase 2 + 3 — one combined API call or two separate calls?~~
+  RESOLVED — there's no separate "Phase 3" issuance to combine or split.
+  Business context (`business_id`) is the only thing ever added to the
+  JWT, via `/auth/select-business` (see "JWT Flow" above); role/
+  permissions are never a token claim at all, loaded fresh per request
+  instead (`Custom_RBAC.md`).
 - business_links shared_resources JSONB — is this enough or do we need separate link config tables per resource type?
 - Bar V1 — inside Dining module (simpler) or separate module from day 1?
 - Customer CRM V1 — exact fields stored in Identity vs Business vs future CRM module?
