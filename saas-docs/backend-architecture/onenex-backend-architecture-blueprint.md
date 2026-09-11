@@ -213,38 +213,45 @@ src/
 │   └── DependencyInjection.cs        ← AddSharedInfrastructure(), UseCorrelationId(), UseExceptionHandling()
 │
 ├── Modules/
-│   ├── Identity/                     ← Core module
-│   │   ├── Identity.Domain/
-│   │   ├── Identity.Application/
-│   │   │   ├── AssemblyReference.cs  ← Assembly marker for MediatR scan
-│   │   │   └── Features/
-│   │   │       └── {Feature}/
-│   │   │           ├── {Feature}Command.cs / {Feature}Query.cs
-│   │   │           ├── {Feature}Handler.cs
-│   │   │           ├── {Feature}Validator.cs
-│   │   │           └── {Feature}Dto.cs
-│   │   ├── Identity.Infrastructure/
-│   │   │   └── DependencyInjection.cs  ← AddIdentityModule()
-│   │   └── Identity.Presentation/
-│   │       ├── Controllers/
-│   │       ├── Hubs/
-│   │       └── DependencyInjection.cs  ← AddIdentityPresentation()
+│   ├── Platform/                     ← Always on. Foundation for everything.
+│   │   ├── Identity/                 ← Auth, JWT, refresh tokens, customer accounts
+│   │   │   ├── Identity.Domain/
+│   │   │   ├── Identity.Application/
+│   │   │   │   ├── AssemblyReference.cs  ← Assembly marker for MediatR scan
+│   │   │   │   └── Features/
+│   │   │   │       └── {Feature}/
+│   │   │   │           ├── {Feature}Command.cs / {Feature}Query.cs
+│   │   │   │           ├── {Feature}Handler.cs
+│   │   │   │           ├── {Feature}Validator.cs
+│   │   │   │           └── {Feature}Dto.cs
+│   │   │   ├── Identity.Infrastructure/
+│   │   │   │   └── DependencyInjection.cs  ← AddIdentityModule()
+│   │   │   └── Identity.Presentation/
+│   │   │       ├── Controllers/
+│   │   │       ├── Hubs/
+│   │   │       └── DependencyInjection.cs  ← AddIdentityPresentation()
+│   │   │
+│   │   ├── Business/                 ← Businesses, operations, settings, links
+│   │   │   └── (same 4-project structure)
+│   │   │
+│   │   └── Membership/               ← Staff, roles, permissions, audit log
+│   │       └── (same 4-project structure)
 │   │
-│   ├── Business/
-│   │   └── (same 4-project structure)
+│   ├── Shared/                       ← Active for every business, no enable/disable
+│   │   ├── Guest/                    ← Guest profiles, occasions, notes, merge
+│   │   │   └── (same 4-project structure)
+│   │   └── Notification/             ← Email, SMS, push — all modules publish here
+│   │       └── (same 4-project structure)
 │   │
-│   ├── Membership/
-│   │   └── (same 4-project structure)
-│   │
-│   └── Operations/                   ← Operation modules grouped here
-│       ├── Stays/
+│   └── Domain/                       ← Operation modules — each enabled per business
+│       ├── Stays/                    ← Hotel rooms, reservations, check-in/out, folios
 │       │   ├── Stays.Domain/
 │       │   ├── Stays.Application/
 │       │   ├── Stays.Infrastructure/
 │       │   └── Stays.Presentation/
 │       │       ├── Controllers/
-│       │       └── Hubs/             ← SignalR (room status, housekeeping)
-│       └── Dining/
+│       │       └── Hubs/             ← SignalR (room status, housekeeping live updates)
+│       └── Dining/                   ← Restaurant tables, menus, reservations, KDS
 │           └── (same 4-project structure)
 │
 └── Host/
@@ -262,13 +269,18 @@ src/
 tests/
 ├── Architecture.Tests/               ← NetArchTest boundary enforcement
 └── Modules/
-    ├── Identity/
-    │   ├── Identity.Unit.Tests/
-    │   └── Identity.Integration.Tests/
-    ├── Business/
-    ├── Membership/
-    ├── Stays/
-    └── Dining/
+    ├── Platform/
+    │   ├── Identity/
+    │   │   ├── Identity.Unit.Tests/
+    │   │   └── Identity.Integration.Tests/
+    │   ├── Business/
+    │   └── Membership/
+    ├── Shared/
+    │   ├── Guest/
+    │   └── Notification/
+    └── Domain/
+        ├── Stays/
+        └── Dining/
 ```
 
 ### Why Middleware lives in Shared.Infrastructure, not WebAPI

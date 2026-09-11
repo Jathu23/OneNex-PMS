@@ -40,19 +40,88 @@ Never directly. Never across database tables.
 
 ## Full Module Map
 
+**Total: 13 modules** across 4 layers.
+
 ```
-┌───────────────────────────────────────────────────────────────────┐
-│                     PLATFORM MODULES (Phase 2+)                    │
-│          Analytics      Loyalty      Offers      Folio Hub         │
-├───────────────────────────────────────────────────────────────────┤
-│                     OPERATION MODULES                              │
-│   Dining (P1)   Stays (P2)   Bar   Wellness   Events   Retail     │
-├─────────────────────────┬─────────────────────────────────────────┤
-│     SHARED SERVICES     │            CORE MODULES                  │
-│   Payment               │   Identity     Business    Membership    │
-│   Notification          │                                          │
-└─────────────────────────┴─────────────────────────────────────────┘
-          ↑ build first                     ↑ build first (Phase 0)
+┌─────────────────────────────────────────────────────────────────────┐
+│                      PLATFORM MODULES (3)                           │
+│              Always on. Every business needs these.                 │
+│                                                                     │
+│        Identity          Business          Membership               │
+│    auth, users, tokens  business entity   staff, roles,            │
+│    customer_accounts    operations         permissions              │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                       SHARED MODULES (4)                            │
+├──────────────────────────────────┬──────────────────────────────────┤
+│    Always On (2)                 │    Add-ons / Optional (2)        │
+│    Every business gets these     │    Enable when needed            │
+│                                  │                                  │
+│    Guest           Notification  │    Loyalty        CRM            │
+│    guest profiles  email, SMS    │    points, tiers  campaigns      │
+│    VIP, blacklist  push, templates│   redemption     segmentation  │
+│    occasions       delivery log  │    (Phase 2)      (Phase 3)     │
+└──────────────────────────────────┴──────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                      DOMAIN MODULES (6)                             │
+│         One per operation. Enable when business needs it.           │
+│                                                                     │
+│   Stays    Dining     Bar      Wellness    Events     Retail        │
+│  hotel PMS restaurant beverage  spa/treat  conferenc   POS         │
+│            F&B                  ments      ticketing   products    │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│               PLATFORM FEATURES (Phase 2+)                          │
+│        Built after operations exist and produce data.               │
+│                                                                     │
+│       Analytics & Reports          Folio Hub                        │
+│       cross-operation insights     cross-operation billing          │
+│       KPI dashboards               (extracted from Stays Phase 3)   │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│               SHARED INFRASTRUCTURE (not modules)                   │
+├──────────────────────────────────┬──────────────────────────────────┤
+│         Shared.Kernel            │       Shared.Contracts           │
+│   Entity, AggregateRoot          │  IGuestService                   │
+│   ValueObjects: Money, Email     │  INotificationService            │
+│   DateRange, PhoneNumber         │  IStaysService                   │
+│   Exceptions, IDomainEvent       │  IRbacService                    │
+│                                  │  + all cross-module interfaces   │
+└──────────────────────────────────┴──────────────────────────────────┘
+```
+
+### Module Type Definitions
+
+```
+PLATFORM MODULES:
+  Core platform concerns. Every business on OneNex has these.
+  Cannot be disabled. Foundation everything else sits on.
+
+SHARED — Always On:
+  Guest    → who is the customer? cross-operation CRM foundation.
+  Notification → all outbound communication. no module sends email directly.
+
+  Both active as soon as a business exists. Cannot be disabled.
+
+SHARED — Add-ons:
+  Loyalty → points, tiers, rewards. Enable when business wants a loyalty program.
+  CRM     → campaigns, segmentation, win-back. Enable when marketing needed.
+
+  Both reference Guest module. Neither references each other.
+  A business can enable Loyalty without CRM, or CRM without Loyalty.
+
+DOMAIN MODULES:
+  Each = one operation type a hospitality business can run.
+  Follows Two-Level Modularity: Core (always on) + Add-ons (enable when needed).
+  Enable/disable per business at Business module level.
+
+PLATFORM FEATURES:
+  Cross-operation analysis and billing. Needs data from running operations.
+  Cannot be built before operations exist.
 ```
 
 ---
