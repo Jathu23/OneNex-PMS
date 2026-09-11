@@ -104,8 +104,12 @@ Source: `identity-module-design.md` § APIs.
 | GET | `/auth/me/memberships` | JWT | Business/role list (Membership-backed) |
 | POST | `/auth/select-business` | JWT | Reissue JWT with `business_id` (Membership context) |
 
-`JWT_1` = plain login token (no `business_id`). `JWT_2` = the same token
-reissued with `business_id` via `/auth/select-business`, required by any
+There is exactly **one** JWT structure (see `identity-module-design.md` →
+"JWT Design") — it is never a family of separate token types. Other docs'
+tables mark which *state* of that one token an endpoint needs:
+`JWT (no business_id)` = the token as issued by `/auth/login`, before any
+business is selected; `JWT (business_id)` = the same token reissued with
+`business_id` populated via `/auth/select-business`, required by any
 business-scoped endpoint in another module.
 
 ---

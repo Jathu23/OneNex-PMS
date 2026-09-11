@@ -57,24 +57,30 @@ Never directly. Never across database tables.
 
 ---
 
-## JWT Flow — 3 Phases
+## JWT Flow — 2 Phases, One Token
+
+There is exactly **one** JWT structure (see `identity-module-design.md` →
+"JWT Design") — it is reissued in place as its context changes, never
+replaced by a different token type. Permissions are deliberately **not**
+a JWT claim (see `Custom_RBAC.md` §"JWT permissions: Not included") —
+they change independently of login/business-selection and would go stale
+the moment a role changed mid-session, so they're loaded fresh per
+request instead.
 
 ```
 PHASE 1: Login (Identity Module)
 → Verify email + password
-→ JWT_1: { user_id, email }   ← no business context yet
+→ JWT issued: { user_id, ... }   ← no business_id yet
 
-PHASE 2: Business context (Business Module)
+PHASE 2: Business context (Business Module / Identity's /auth/select-business)
 → Subdomain slug → business_id  (staff at {slug}.onenex.com)
    OR owner selects from list   (owner at app.onenex.com)
-→ JWT_2: { user_id, business_id }
+→ Same JWT reissued in place with business_id populated
 
-PHASE 3: Permissions loaded (Membership Module)
-→ Load role + permissions for this user in this business
-→ JWT_3: { user_id, business_id, role, permissions[] }
-
-ALL API CALLS USE JWT_3.
+ALL BUSINESS-SCOPED API CALLS USE THE JWT'S business_id CLAIM.
 Every DB query: WHERE business_id = jwt.business_id
+Role + permissions for (user_id, business_id) are loaded per request
+(Membership module, cached — see Custom_RBAC.md), not carried in the token.
 Cross-tenant data: impossible by design.
 ```
 
@@ -86,7 +92,7 @@ Cross-tenant data: impossible by design.
 Owner sign up + login         → Identity Module
 Create first business         → Business Module
 Enable operation (dining...)  → Business Module
-                                → JWT_2 + JWT_3 issued here
+                                → JWT reissued with business_id here
 Operation setup (tables/menu) → Dining Module (or relevant operation)
 Invite staff + set roles      → Membership Module
 Owner dashboard               → Business Module

@@ -54,7 +54,7 @@ What actually varies per scope is the *customer relationship data*, and it lands
 | View menu via QR | ✅ | — | Pure read, never touches `business_customers` |
 | Place order via QR | ✅ | — | Guest capture only (name + phone) — same shape as the walk-in path, `customer-module-design.md` §6.1. Order FKs to a guest `business_customer_id`; no account needed |
 | Online room booking | ✅ (login optional) | — | Guest checkout works the same way (name + phone/email is enough — yes, "just name+email" is sufficient). If already logged in, resolves via `AttachToBusinessAsync` instead (§6.2) — login is an enhancement, never a requirement |
-| View booking history | — | ✅ | Served by `GET /api/customers/me/businesses` (JWT_1). A guest `business_customers` row has no login of its own to authenticate as until it's linked |
+| View booking history | — | ✅ | Served by `GET /api/customers/me/businesses` (JWT, no business_id). A guest `business_customers` row has no login of its own to authenticate as until it's linked |
 | Cancel/modify booking | — | ✅ (for now) | Neither canonical doc defines a guest-safe cancel/modify path — the OTP-link idea (`guest_action_tokens`) exists only in the superseded `customer-identity-design.md`. Until revisited, this needs a linked account, or a separate confirmation-code mechanism the *booking* module (Dining/Stays) would have to design on its own |
 | Loyalty / points | — | ✅ | Needs a persistent identity to accrue against; also explicitly out of scope for V1 regardless (`customer-module-design.md` §16 — only `marketing_opt_in` exists, no points ledger) |
 

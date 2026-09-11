@@ -103,21 +103,24 @@ Source: `customer-module-design.md` §11.
 
 | Method | Endpoint | Auth | Purpose |
 |---|---|---|---|
-| POST | `/api/businesses/{businessId}/customers/lookup` | JWT_2, `crm:customers:create` | Staff/POS find-or-create by phone/email |
-| GET | `/api/businesses/{businessId}/customers` | JWT_2, `crm:customers:view` | Staff-facing list/search |
-| GET | `/api/businesses/{businessId}/customers/{id}` | JWT_2, `crm:customers:view` | Profile detail |
-| PUT | `/api/businesses/{businessId}/customers/{id}` | JWT_2, `crm:customers:update` | Edit name/notes/tags/opt-in |
-| DELETE | `/api/businesses/{businessId}/customers/{id}` | JWT_2, `crm:customers:delete` | Soft-delete |
-| POST | `/api/businesses/{businessId}/customers/attach` | JWT_1 | Internal — platform booking attaches logged-in user |
-| GET | `/api/customers/me/claimable` | JWT_1 | List unlinked profiles matching my **verified** contact info (reads Identity via `IIdentityService`) |
-| POST | `/api/customers/me/claim/{businessCustomerId}` | JWT_1 | Link a guest profile to myself (writes `business_customers.user_id` + `business_customer_merge_log`) |
-| GET | `/api/customers/me/businesses` | JWT_1 | "Where have I got history" |
+| POST | `/api/businesses/{businessId}/customers/lookup` | JWT (business_id), `crm:customers:create` | Staff/POS find-or-create by phone/email |
+| GET | `/api/businesses/{businessId}/customers` | JWT (business_id), `crm:customers:view` | Staff-facing list/search |
+| GET | `/api/businesses/{businessId}/customers/{id}` | JWT (business_id), `crm:customers:view` | Profile detail |
+| PUT | `/api/businesses/{businessId}/customers/{id}` | JWT (business_id), `crm:customers:update` | Edit name/notes/tags/opt-in |
+| DELETE | `/api/businesses/{businessId}/customers/{id}` | JWT (business_id), `crm:customers:delete` | Soft-delete |
+| POST | `/api/businesses/{businessId}/customers/attach` | JWT (no business_id) | Internal — platform booking attaches logged-in user |
+| GET | `/api/customers/me/claimable` | JWT (no business_id) | List unlinked profiles matching my **verified** contact info (reads Identity via `IIdentityService`) |
+| POST | `/api/customers/me/claim/{businessCustomerId}` | JWT (no business_id) | Link a guest profile to myself (writes `business_customers.user_id` + `business_customer_merge_log`) |
+| GET | `/api/customers/me/businesses` | JWT (no business_id) | "Where have I got history" |
 
-`JWT_1` = Identity's plain login token (no `business_id` claim). `JWT_2`
-= the same token reissued with `business_id` via Identity's
-`/auth/select-business` (see `../identity/identity-db-api-reference.md`
-§3). Staff-facing endpoints above require `JWT_2`; customer-self-service
-endpoints (`/api/customers/me/*`) require only `JWT_1`.
+There is exactly **one** JWT structure (`identity-module-design.md` →
+"JWT Design") — `JWT (no business_id)` and `JWT (business_id)` above are
+the same token at two lifecycle states, not two token types. The token
+starts with no `business_id` claim at `/auth/login` and gets it populated
+in place via `/auth/select-business` (see
+`../identity/identity-db-api-reference.md` §3). Staff-facing endpoints
+above require the `business_id` state; customer-self-service endpoints
+(`/api/customers/me/*`) work with the no-`business_id` state.
 
 ---
 
