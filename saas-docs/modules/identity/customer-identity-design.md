@@ -334,6 +334,12 @@ Guest JWT payload:
   "exp": 1234567890   ← 7 days
 }
 
+client_id ("guest-web" / "guest-ios" / "guest-android") deliberately not included yet —
+see identity-module-design.md § Platform-Specific ClientId, which adds the equivalent
+concept to the logged-in ApplicationUser session (refresh_tokens.client_id) but leaves
+the guest JWT as an open decision (D-below) since it's a different, DB-row-less token
+shape with its own owner.
+
 Signed with: RS256 (same key as access tokens)
 Stored by frontend: localStorage per business
   Key: "guest_token_{business-slug}"
@@ -475,3 +481,4 @@ guest_action_tokens (hashed) → staff-initiated OTP links
 | D2 | QR table ordering — anonymous or phone OTP? | PENDING |
 | D3 | Customer login method — email+pass? OTP? Google? | PENDING |
 | D6 | Guest → Account upgrade flow (claim bookings) — V1 or Phase 2? | PENDING |
+| D7 | Add `client_id` claim to guest JWT (guest-web/guest-ios/guest-android), mirroring `identity-module-design.md` § Platform-Specific ClientId — V1 or later? | PENDING |

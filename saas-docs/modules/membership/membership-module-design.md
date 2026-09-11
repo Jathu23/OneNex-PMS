@@ -2,6 +2,8 @@
 
 > Draft — Core module. Reviewed and finalized during architecture planning.
 > This module answers: "Who can access which business, with what role, and what are they allowed to do?"
+>
+> **Note:** [`Custom_RBAC.md`](./Custom_RBAC.md) in this same folder is the authoritative, final implementation baseline for this module — it merges this document with a second RBAC design and adds caching, versioning, audit and the branch-access dimension described below. Where the two disagree, `Custom_RBAC.md` wins. This document has been updated to stay consistent with it on branch access.
 
 ---
 
@@ -41,7 +43,7 @@ UI shows complexity only when owner asks for it.
 
 ---
 
-## Two Role Dimensions
+## Three Independent Access Dimensions
 
 ### Dimension 1: `business_role`
 
@@ -75,9 +77,21 @@ staff       → create + view only
 viewer      → view only
 ```
 
-**These two dimensions are fully independent.**
-`business_role = admin` does NOT grant operation access.
+### Dimension 3: `branch_access`
+
+Governs **which physical location's** data staff can see or act on — completely independent of `business_role` and Operation Role. Matches the "Branch Access Control" flow from the product mockups: a Manager can be granted Jaffna and Colombo but denied Kandy, regardless of their Dining role being `manager` everywhere.
+
+```
+owner  → implicit access to every branch (bypass, no staff_branch_access rows needed)
+admin/member → access only to branches with an explicit staff_branch_access row
+```
+
+Default on invite: one `staff_branch_access` row per branch **currently active** on the business (same auto-populate pattern as operation access). Owner can then customize — revoke specific branches per staff member.
+
+**These three dimensions are fully independent.**
+`business_role = admin` does NOT grant operation access, and does NOT grant branch access.
 Operation reports, void, configs — all come from operation role only.
+Which branch's data is visible — comes from branch access only.
 
 ---
 
@@ -92,11 +106,15 @@ Step 1: business_role = owner?
 Step 2: Suspension check (Redis)
         → suspended? → 401 immediately
 
-Step 3: Operation role check
+Step 3: Branch access check (only if the request targets a branch-scoped resource)
+        → staff_branch_access row exists for this branch?
+        → NO → 403 (no access to this branch)
+
+Step 4: Operation role check
         → staff_operation_access row exists for this operation?
         → NO → 403 (no access to this operation)
 
-Step 4: Permission check (Redis cache)
+Step 5: Permission check (Redis cache)
         → "dining:orders:void" in user's permission list?
         → YES → proceed
         → NO  → 403
@@ -217,6 +235,32 @@ Owner customizes: Kamal's Stays → viewer, Bar → no access.
 
 ---
 
+### `staff_branch_access` — per-branch grant
+
+```sql
+id, staff_membership_id → staff_memberships.id,
+branch_id → branches.id (Business module),
+granted_by_user_id → users.id,
+granted_at
+UNIQUE(staff_membership_id, branch_id)
+```
+
+Default invite flow: one row per branch **active at invite time** — same pattern as operation access auto-populate.
+
+```
+Owner invites Kamal as "Manager":
+  Jaffna Branch (HQ) → auto-granted
+  Colombo Branch     → auto-granted
+  Kandy Branch       → auto-granted
+  [auto-populated for all currently active branches]
+
+Owner customizes: revokes Kamal's Kandy Branch access.
+```
+
+`business_role = owner` bypasses this table entirely — no rows are needed for an owner to see every branch. A new branch created later is **not** retroactively granted to existing non-owner staff; it requires an explicit grant (mirrors the "new operation" open question below).
+
+---
+
 ### `staff_custom_permissions` — per-staff overrides
 
 ```sql
@@ -306,6 +350,8 @@ Constants used — no magic strings. Typo = compile error, not runtime error.
   → PermissionAuthorizationHandler: does the actual check
       → owner? bypass
       → suspended? fail
+      → request targets a branch? → Redis: branch-access:{userId}:{businessId}
+          not in list? → fail (403)
       → Redis: permissions:{userId}:{businessId}
           HIT  → check list
           MISS → DB load → cache → check list
@@ -320,6 +366,10 @@ Constants used — no magic strings. Typo = compile error, not runtime error.
 Cache key:    permissions:{userId}:{businessId}
 Cache value:  ["dining:orders:view", "dining:orders:create", ...]
 TTL:          5 minutes (auto-expiry safety net)
+
+Cache key:    branch-access:{userId}:{businessId}
+Cache value:  ["branch_id_1", "branch_id_2", ...]
+TTL:          5 minutes (same safety net; invalidated on grant/revoke)
 
 Suspension:   suspended:{userId}:{businessId} = "1"  TTL: 24h
 ```
@@ -355,6 +405,9 @@ Cache miss → ~5ms (DB query) — only on first request or after change
 | Change business settings | business_role: admin, owner |
 | Manage subscription | business_role: owner only |
 | Manage custom roles | business_role: admin, owner |
+| Create / close a branch | business_role: admin, owner (Business module `business.branch.manage`) |
+| Grant / revoke a staff member's branch access | business_role: admin, owner |
+| See or act on a branch's data | branch_access: explicit grant for that branch — OR business_role: owner (bypass) |
 | Manage menu | dining operation role: manager, full |
 | Take orders | dining operation role: staff and above |
 | Void orders | dining operation role: manager, full |
@@ -377,6 +430,7 @@ roles
 users + businesses
   └── staff_memberships          UNIQUE(user_id, business_id)
         ├── business_role         owner | admin | member
+        ├── staff_branch_access    (per branch grant → branches.id, Business module)
         ├── staff_operation_access  (per operation → role_id)
         └── staff_custom_permissions (per-staff overrides)
 
@@ -391,6 +445,10 @@ staff_invitations → accepted → staff_memberships created
 ```
 BusinessCreatedEvent    → create owner staff_membership (business_role = owner)
                           all current operations → full access
+                          (owner needs no staff_branch_access rows — bypass)
+
+BranchCreatedEvent      → no automatic staff_branch_access rows for non-owner staff;
+                          explicit grant required (Business module event, §26)
 ```
 
 **Published:**
@@ -398,8 +456,9 @@ BusinessCreatedEvent    → create owner staff_membership (business_role = owner
 StaffInvitedEvent       → Notification: send invitation email
 StaffJoinedEvent        → audit
 StaffSuspendedEvent     → Redis: set suspension flag immediately
-StaffRemovedEvent       → Redis: delete permissions cache
+StaffRemovedEvent       → Redis: delete permissions + branch-access cache
 PermissionsChangedEvent → Redis: delete permissions cache
+BranchAccessChangedEvent → Redis: delete branch-access cache
 ```
 
 ---
@@ -413,8 +472,13 @@ public interface IMembershipService
     Task<bool>         IsActiveMember(Guid userId, Guid businessId);
     Task<string>       GetBusinessRole(Guid userId, Guid businessId);
     Task<List<string>> GetPermissions(Guid userId, Guid businessId);
+    Task<bool>         HasBranchAccess(Guid userId, Guid businessId, Guid branchId);
+    Task<List<Guid>>   GetAccessibleBranches(Guid userId, Guid businessId);
+    Task<List<MembershipSummaryDto>> GetMyMemberships(Guid userId);
 }
 ```
+
+`GetMyMemberships` returns every business (with role + accessible branches) the user belongs to — it powers the Owner Portal's business/branch picker (see Identity module's Business Context & Portal Access flow). It is the one query in this interface that is not scoped to a single business, by design — it is how a user discovers which businesses they can even select.
 
 No other module queries membership tables directly.
 
@@ -428,6 +492,7 @@ No other module queries membership tables directly.
 | `roles` | Build — 5 system operation roles seeded |
 | `role_permissions` | Build — default sets seeded |
 | `staff_memberships` | Build |
+| `staff_branch_access` | Build |
 | `staff_operation_access` | Build |
 | `staff_custom_permissions` | Build |
 | `staff_invitations` | Build |
@@ -443,6 +508,7 @@ Modules/Membership/
 │   │   ├── Role.cs
 │   │   ├── RolePermission.cs
 │   │   ├── StaffMembership.cs
+│   │   ├── StaffBranchAccess.cs
 │   │   ├── StaffOperationAccess.cs
 │   │   ├── StaffCustomPermission.cs
 │   │   └── StaffInvitation.cs
@@ -462,6 +528,9 @@ Modules/Membership/
 │       ├── OperationAccess/
 │       │   ├── Commands/ SetOperationAccess
 │       │   └── Queries/  GetOperationAccess
+│       ├── BranchAccess/
+│       │   ├── Commands/ GrantBranchAccess, RevokeBranchAccess
+│       │   └── Queries/  GetBranchAccess, GetMyMemberships
 │       ├── Permissions/
 │       │   ├── Commands/ SetCustomPermissions
 │       │   └── Queries/  GetEffectivePermissions
@@ -501,7 +570,9 @@ Modules/Membership/
 ## Open Questions
 
 - New operation enabled after staff already onboarded → auto-assign default role or require explicit assignment?
+- New branch created after staff already onboarded → confirmed: explicit assignment required, no auto-grant (see `staff_branch_access` above) — revisit only if product later wants an "auto-grant new branches" toggle per staff member.
 - Custom role deletion → blocked if staff assigned. Reassign first or soft-delete?
 - Invitation resend → new token or extend expiry?
 - PIN: length, numeric only, lockout after N failed attempts?
+- Branch-access cache TTL / invalidation — same Redis key pattern as permissions, or a longer TTL since branch grants change less often?
 - Redis TTL: 5 min currently — adjust based on load testing?
