@@ -668,6 +668,12 @@ CustomerCapturedEvent        → analytics; Notification may send a
 CustomerAccountLinkedEvent   → invalidate any cached guest/linked state;
                                 audit
 CustomerProfileUpdatedEvent  → staff edited name/notes/tags
+GuestDeviceClaimedEvent       → introduced by guest-ordering-flow.md §12
+                                (anonymous QR ordering's device-based
+                                account-linking path) — consumed by the
+                                ordering/Dining module to link its own
+                                `orders` rows; this module never writes
+                                `orders` directly
 ```
 
 ---

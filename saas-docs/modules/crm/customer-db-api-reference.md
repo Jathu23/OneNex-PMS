@@ -112,6 +112,7 @@ Source: `customer-module-design.md` §11.
 | GET | `/api/customers/me/claimable` | JWT (no business_id) | List unlinked profiles matching my **verified** contact info (reads Identity via `IIdentityService`) |
 | POST | `/api/customers/me/claim/{businessCustomerId}` | JWT (no business_id) | Link a guest profile to myself (writes `business_customers.user_id` + `business_customer_merge_log`) |
 | GET | `/api/customers/me/businesses` | JWT (no business_id) | "Where have I got history" |
+| POST | `/api/businesses/{businessId}/customers/claim-by-device` | JWT (no business_id) | Auto-link every unclaimed, device-tagged anonymous QR order to the logged-in account — see `guest-ordering-flow.md` §12. Not a D6 verified-match claim; a separate, weaker device-correlation mechanism |
 
 There is exactly **one** JWT structure (`identity-module-design.md` →
 "JWT Design") — `JWT (no business_id)` and `JWT (business_id)` above are
@@ -132,6 +133,14 @@ CustomerAccountLinkedEvent
 CustomerProfileUpdatedEvent
     → consumed by Notification/analytics; Identity does not consume these
       (it has no concept of a business-scoped customer profile)
+
+GuestDeviceClaimedEvent { businessId, guestDeviceId, businessCustomerId }
+    → introduced by guest-ordering-flow.md §12, published by
+      claim-by-device (§4 above) after AttachToBusinessAsync resolves
+      the account. Consumed by the ordering/Dining module, which applies
+      the link to its own `orders` rows — CRM never writes `orders`
+      directly (see onenex-backend-module-boundaries.md's module-
+      boundary rule).
 ```
 
 ---
@@ -143,3 +152,8 @@ CustomerProfileUpdatedEvent
   out of scope here. See `customer-module-design.md` §14.
 - Business module tables (`businesses`, `branches`, `api_keys`) — only
   referenced here as FK targets, not detailed.
+- The `orders` table and its guest-facing credentials (Order Access
+  Token, confirmation code, Guest Device ID) — owned by the ordering/
+  Dining module, not CRM. Full design: `guest-ordering-flow.md`. This
+  doc lists only the one CRM-owned endpoint that flow needs
+  (`claim-by-device`, §4) and the event it publishes (§5).
